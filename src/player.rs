@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
-use crate::level::{Handhold, WORLD_GROUP};
+use crate::level::{Handhold, Holds, WORLD_GROUP};
 use crate::tuning::*;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -159,7 +159,7 @@ impl Player {
         }
     }
 
-    fn jump(&mut self, holds: &Query<(&GlobalTransform, &Handhold)>) {
+    fn jump(&mut self, holds: &Holds) {
         let mut can_jump = self.state != PlayerState::Hanging;
         let mut jump_mult_sum = 0.0;
         let mut hanging_hands = 0;
@@ -178,6 +178,7 @@ impl Player {
                     can_jump = true;
                     continue;
                 };
+                let handhold = Handhold::or_ledge(handhold);
                 hanging_hands += 1;
                 if handhold.allow_airborne_jump || on_ground {
                     can_jump = true;
@@ -237,7 +238,7 @@ impl Player {
     fn hang(
         &mut self,
         h: HangInput,
-        holds: &Query<(&GlobalTransform, &Handhold)>,
+        holds: &Holds,
         cur_speed: &mut f32,
         cur_drag: &mut f32,
     ) -> Vec3 {
@@ -278,6 +279,7 @@ impl Player {
                 self.hands[i].release();
                 continue;
             };
+            let handhold = Handhold::or_ledge(handhold);
 
             let mut arm = hold_transform.transform_point(hold.local) - h.pos;
             let length = arm.length();
@@ -340,7 +342,7 @@ pub fn spawn_player(commands: &mut Commands, pos: Vec3, yaw: f32) {
                 min_width: CharacterLength::Absolute(0.2),
                 include_dynamic_bodies: false,
             }),
-            snap_to_ground: None,
+            snap_to_ground: Some(CharacterLength::Absolute(GROUND_SNAP)),
             apply_impulse_to_dynamic_bodies: false,
             // Handholds are grabbed, not stood on.
             filter_groups: Some(CollisionGroups::new(Group::ALL, WORLD_GROUP)),
@@ -360,7 +362,7 @@ pub fn player_movement(
         &mut KinematicCharacterController,
         Option<&KinematicCharacterControllerOutput>,
     )>,
-    holds: Query<(&GlobalTransform, &Handhold)>,
+    holds: Holds,
 ) {
     let Ok((entity, transform, mut player, mut controller, output)) = players.single_mut() else {
         return;
@@ -553,7 +555,14 @@ pub fn player_movement(
         p.vel = project_on_plane(p.vel, p.hit_normal);
     }
 
-    controller.translation = Some(p.vel * dt * VEL_SCALE);
+    let mut step = p.vel * dt * VEL_SCALE;
+    // The original presses the body into the floor every tick. This character
+    // controller often answers that by not moving at all, so on walkable
+    // ground the downward part is dropped and ground snapping keeps contact.
+    if p.is_grounded && !p.is_sliding && step.y < 0.0 {
+        step.y = 0.0;
+    }
+    controller.translation = Some(step);
     p.clamp_to_last_move = !vertical_slide && p.is_grounded;
 }
 

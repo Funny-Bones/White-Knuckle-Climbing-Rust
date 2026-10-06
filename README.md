@@ -12,7 +12,7 @@ cargo run
 
 | Input | Action |
 | --- | --- |
-| Left / right mouse (hold) | Grab with that hand; holding the button grabs as soon as a hold is in reach |
+| Left / right mouse (hold) | Grab with that hand; holding the button grabs as soon as a hold or a ledge is in reach |
 | W / S | Pull up / lower yourself while hanging; walk on the ground |
 | A / D | Shift sideways |
 | Space | Jump (hands let go and pay a grip cost) |
@@ -40,6 +40,14 @@ cargo run
 
 Not ported: items and tools (pitons, rebar, hammer), perks and buffs, moving
 handholds, crouch height, swimming, fall damage, footsteps and voice lines.
+
+## Ledge grabbing
+
+Not from the original: a hand can also grab the top edge of any solid
+structure. Look at a wall just below its top (or slightly over the edge) and
+hold a mouse button; the aim dot shows the grip point. A ledge behaves like a
+standard handhold. Pulling up only works while looking level or upward, as in
+the original: looking down with W held lowers you instead.
 
 ## The test park
 
@@ -110,3 +118,9 @@ override them.
 `WK_SELFTEST=1 cargo run` plays a short scripted climb (walk to the wall, grab,
 pull up, second hand, jump) and logs the body's position and grip each quarter
 second, then exits. It also saves three screenshots to `target/selftest_*.png`.
+
+`WK_WALK=1 cargo run` walks and sprints around open ground for 40 seconds and
+reports how many times the body lost its speed without being told to stop.
+
+`WK_LEDGE=1 cargo run` grabs the top of a three metre block, pulls up and over,
+and reports whether the body ended up standing on it.

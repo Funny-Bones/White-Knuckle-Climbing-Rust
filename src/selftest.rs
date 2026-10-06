@@ -20,6 +20,8 @@ pub struct Script {
     at_wall: Option<f32>,
     max_height: f32,
     shots: usize,
+    frames: u32,
+    slowest_frame: f32,
 }
 
 pub fn run(
@@ -39,6 +41,11 @@ pub fn run(
     let t = time.elapsed_secs();
     let eye = player.cur_pos + Vec3::Y * EYE_OFFSET;
     script.max_height = script.max_height.max(player.cur_pos.y);
+    // Skip the first second, which is dominated by start-up hitches.
+    if t > 1.0 {
+        script.frames += 1;
+        script.slowest_frame = script.slowest_frame.max(time.delta_secs());
+    }
 
     // The n-th lowest handhold of the main wall's first pitch.
     let hold_at = |n: usize| {
@@ -100,6 +107,11 @@ pub fn run(
                 mouse.release(MouseButton::Right);
             } else {
                 info!("selftest: done, max body height {:.2}", script.max_height);
+                info!(
+                    "selftest: {:.0} fps average, slowest frame {:.1} ms",
+                    script.frames as f32 / (t - 1.0),
+                    script.slowest_frame * 1000.0
+                );
                 std::process::exit(0);
             }
         }
@@ -154,6 +166,173 @@ pub fn overview(
     *camera = Transform::from_translation(eye).looking_at(target, Vec3::Y);
     if t.fract() > 0.5 && *shots == index {
         let path = format!("target/overview_{index}.png");
+        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
+        *shots += 1;
+    }
+}
+
+/// `WK_WALK=1` walks around open ground for a while, counting the moments
+/// where the body loses its speed without being told to stop, then exits.
+pub fn walk_enabled() -> bool {
+    std::env::var_os("WK_WALK").is_some()
+}
+
+#[derive(Default)]
+pub struct WalkLog {
+    next_log: f32,
+    stalls: u32,
+    stalled: bool,
+}
+
+pub fn walk(
+    time: Res<Time>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut locked: ResMut<CursorLocked>,
+    mut players: Query<&mut Player>,
+    mut log: Local<WalkLog>,
+) {
+    let Ok(mut player) = players.single_mut() else {
+        return;
+    };
+    locked.0 = true;
+    let t = time.elapsed_secs();
+    if t > 40.0 {
+        info!("walk: done, {} stalls (bumping into a structure counts as one)", log.stalls);
+        std::process::exit(0);
+    }
+    // Wander in wide loops south of the spawn, sprinting half the time.
+    player.yaw = std::f32::consts::PI + (t * 0.35).sin() * 1.4;
+    keys.press(KeyCode::KeyW);
+    if (t as i32 / 5) % 2 == 1 {
+        keys.press(KeyCode::ShiftLeft);
+    } else {
+        keys.release(KeyCode::ShiftLeft);
+    }
+
+    let stalled = t > 2.0 && player.is_grounded && player.speed_mps < 1.0;
+    if stalled && !log.stalled {
+        log.stalls += 1;
+        info!("walk: stalled at t={t:.2} pos={:.1}", player.cur_pos);
+    }
+    log.stalled = stalled;
+    if t >= log.next_log {
+        log.next_log = t + 5.0;
+        info!("walk t={t:5.1} pos={:.1} speed={:.2}", player.cur_pos, player.speed_mps);
+    }
+}
+
+/// `WK_LEDGE=1` stands in front of a three metre block, grabs its top edge
+/// with both hands, pulls up and over, and reports where the body ends up.
+pub fn ledge_enabled() -> bool {
+    std::env::var_os("WK_LEDGE").is_some()
+}
+
+pub fn ledge(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+    mut locked: ResMut<CursorLocked>,
+    mut players: Query<(&mut Transform, &mut Player)>,
+    mut stage: Local<u32>,
+    mut next_log: Local<f32>,
+) {
+    let Ok((mut transform, mut player)) = players.single_mut() else {
+        return;
+    };
+    locked.0 = true;
+    let t = time.elapsed_secs();
+    // The fifth stepping block: 1.6 m wide, 3.0 m tall, centred here.
+    let block = Vec3::new(-19.2, 3.0, 22.0);
+    if *stage == 0 {
+        let start = Vec3::new(block.x, 1.2, block.z - 1.6);
+        transform.translation = start;
+        player.teleport(start, std::f32::consts::PI);
+        *stage = 1;
+    }
+    let eye = player.cur_pos + Vec3::Y * EYE_OFFSET;
+    // Look at the wall just under its top edge.
+    let dir = (Vec3::new(block.x, block.y - 0.15, block.z - 0.8) - eye).normalize_or_zero();
+    if t > 1.0 && t < 4.5 {
+        mouse.press(MouseButton::Left);
+        mouse.press(MouseButton::Right);
+        if t < 2.0 {
+            player.yaw = (-dir.x).atan2(-dir.z);
+            player.pitch = dir.y.clamp(-1.0, 1.0).asin();
+        } else {
+            // Pulling up only works while looking up; looking down lowers you.
+            player.pitch = 0.5;
+        }
+    }
+    if t > 2.0 && t < 4.5 {
+        keys.press(KeyCode::KeyW);
+    }
+    if t > 4.5 {
+        keys.release(KeyCode::KeyW);
+        mouse.release(MouseButton::Left);
+        mouse.release(MouseButton::Right);
+        player.pitch = 0.0;
+    }
+    if *stage == 1 && t > 1.8 {
+        commands.spawn(Screenshot::primary_window()).observe(save_to_disk("target/ledge.png"));
+        *stage = 2;
+    }
+    if t >= *next_log {
+        *next_log = t + 0.25;
+        info!(
+            "ledge t={t:4.2} pos={:.2} {:?} grounded={} hands=[{}, {}]",
+            player.cur_pos,
+            player.state,
+            player.is_grounded,
+            player.hands[0].is_hanging(),
+            player.hands[1].is_hanging(),
+        );
+    }
+    if t > 6.5 {
+        let on_top = player.is_grounded && player.cur_pos.y > block.y + 1.0;
+        info!("ledge: done, standing on top of the block: {on_top}");
+        std::process::exit(0);
+    }
+}
+
+/// `WK_HANDS=1` photographs the hand poses: resting, walking, running, and
+/// reaching with one button held.
+pub fn hands_enabled() -> bool {
+    std::env::var_os("WK_HANDS").is_some()
+}
+
+pub fn hands(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+    mut locked: ResMut<CursorLocked>,
+    mut players: Query<&mut Player>,
+    mut shots: Local<usize>,
+) {
+    let Ok(mut player) = players.single_mut() else {
+        return;
+    };
+    locked.0 = true;
+    // Face away from the wall so nothing is in reach.
+    player.yaw = std::f32::consts::PI;
+    player.pitch = 0.0;
+    let t = time.elapsed_secs();
+    let stages = ["rest", "walk", "run", "reach"];
+    let stage = ((t - 1.0).max(0.0) / 1.5) as usize;
+    if stage >= stages.len() {
+        std::process::exit(0);
+    }
+    let set = |keys: &mut ButtonInput<KeyCode>, key, down: bool| {
+        if down { keys.press(key) } else { keys.release(key) }
+    };
+    set(&mut keys, KeyCode::KeyW, stage == 1 || stage == 2);
+    set(&mut keys, KeyCode::ShiftLeft, stage == 2);
+    if stage == 3 {
+        mouse.press(MouseButton::Left);
+    }
+    if *shots == stage && (t - 1.0) - stage as f32 * 1.5 > 1.2 {
+        let path = format!("target/hands_{}.png", stages[stage]);
         commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
         *shots += 1;
     }

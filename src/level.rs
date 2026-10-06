@@ -3,6 +3,7 @@
 
 use std::f32::consts::{PI, TAU};
 
+use bevy::light::CascadeShadowConfigBuilder;
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
 
@@ -44,22 +45,34 @@ pub struct Handhold {
 
 impl Default for Handhold {
     fn default() -> Self {
-        Self {
-            drag_mult: 10.0,
-            climb_mult: 1.0,
-            climb_grav: 0.0,
-            strain_rate: 1.0,
-            jump_mult: 1.0,
-            jump_strain_mult: 1.0,
-            speed_mult: 1.0,
-            hang_vel_adjust: 1.0,
-            drop_on_jump: true,
-            allow_airborne_jump: true,
-        }
+        Self::STANDARD
     }
 }
 
+/// Everything a hand might be holding: handholds, and plain geometry whose
+/// ledge has been grabbed (which has no `Handhold` of its own).
+pub type Holds<'w, 's> = Query<'w, 's, (&'static GlobalTransform, Option<&'static Handhold>)>;
+
 impl Handhold {
+    pub const STANDARD: Handhold = Handhold {
+        drag_mult: 10.0,
+        climb_mult: 1.0,
+        climb_grav: 0.0,
+        strain_rate: 1.0,
+        jump_mult: 1.0,
+        jump_strain_mult: 1.0,
+        speed_mult: 1.0,
+        hang_vel_adjust: 1.0,
+        drop_on_jump: true,
+        allow_airborne_jump: true,
+    };
+
+    /// The tuning for a grabbed point: its own if it is a handhold, the
+    /// standard values if it is a ledge.
+    pub fn or_ledge(handhold: Option<&Handhold>) -> &Handhold {
+        handhold.unwrap_or(&Self::STANDARD)
+    }
+
     /// Burns grip two and a half times as fast.
     fn slick() -> Self {
         Self { strain_rate: 2.5, ..default() }
@@ -86,6 +99,7 @@ struct Palette {
 struct Builder<'a, 'w, 's> {
     commands: &'a mut Commands<'w, 's>,
     meshes: &'a mut Assets<Mesh>,
+    materials: &'a mut Assets<StandardMaterial>,
     palette: Palette,
 }
 
@@ -160,6 +174,7 @@ pub fn setup_level(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    let materials = &mut *materials;
     let mut solid = |r: f32, g: f32, b: f32| {
         materials.add(StandardMaterial {
             base_color: Color::srgb(r, g, b),
@@ -178,7 +193,7 @@ pub fn setup_level(
         spring: solid(0.25, 0.80, 0.40),
         goal: solid(1.0, 0.9, 0.35),
     };
-    let mut b = Builder { commands: &mut commands, meshes: &mut meshes, palette };
+    let mut b = Builder { commands: &mut commands, meshes: &mut meshes, materials, palette };
 
     let ground = b.palette.ground.clone();
     b.block(&ground, Vec3::new(0.0, -0.5, 0.0), Vec3::new(160.0, 1.0, 160.0));
@@ -198,14 +213,82 @@ pub fn setup_level(
     hanging_garden(&mut b);
     great_cube(&mut b);
 
-    commands.spawn((
-        DirectionalLight { illuminance: 9000.0, ..default() },
-        Transform::from_xyz(8.0, 30.0, 14.0).looking_at(Vec3::new(0.0, 12.0, -2.0), Vec3::Y),
+    lighting(&mut b);
+}
+
+/// A low sun for long shadows, cool ambient light so shadowed faces stay
+/// readable, and coloured lamps that mark the structures.
+fn lighting(b: &mut Builder) {
+    b.commands.spawn((
+        DirectionalLight {
+            color: Color::srgb(1.0, 0.93, 0.82),
+            illuminance: 11_000.0,
+            shadow_maps_enabled: true,
+            ..default()
+        },
+        CascadeShadowConfigBuilder {
+            num_cascades: 4,
+            first_cascade_far_bound: 14.0,
+            maximum_distance: 160.0,
+            ..default()
+        }
+        .build(),
+        Transform::from_xyz(40.0, 34.0, 28.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
-    commands.insert_resource(GlobalAmbientLight {
-        brightness: 350.0,
+    b.commands.insert_resource(GlobalAmbientLight {
+        color: Color::srgb(0.72, 0.80, 1.0),
+        brightness: 1400.0,
         ..default()
     });
+
+    let warm = Color::srgb(1.0, 0.62, 0.28);
+    let cool = Color::srgb(0.35, 0.75, 1.0);
+    let green = Color::srgb(0.45, 1.0, 0.55);
+    let red = Color::srgb(1.0, 0.3, 0.25);
+    // Position, colour, and whether the lamp casts shadows.
+    let lamps = [
+        (Vec3::new(-1.5, 27.4, 0.5), warm, true),     // under the main wall's roof
+        (Vec3::new(5.2, 15.4, -0.6), cool, false),    // rest ledge
+        (Vec3::new(13.75, 9.0, -4.0), warm, true),    // inside the chimney
+        (Vec3::new(13.75, 18.5, -4.0), warm, false),
+        (Vec3::new(0.0, 9.6, 12.0), cool, false),     // monkey bars
+        (Vec3::new(25.6, 13.0, -12.4), cool, false),  // spire rest ledges
+        (Vec3::new(25.6, 25.0, -12.4), cool, false),
+        (Vec3::new(25.6, 37.0, -12.4), cool, false),
+        (Vec3::new(24.0, 51.6, -14.0), warm, false),  // spire summit
+        (Vec3::new(27.5, 12.0, -2.0), red, false),    // slick tower
+        (Vec3::new(27.5, 12.0, 4.0), green, false),   // spring tower
+        (Vec3::new(20.0, 3.0, 11.5), warm, true),     // under the leaning slab
+        (Vec3::new(15.0, 8.5, 18.0), cool, false),    // hanging garden
+        (Vec3::new(20.0, 8.0, 20.0), warm, false),    // traverse wall
+        (Vec3::new(0.0, 14.0, 32.0), cool, false),    // inside the spiral
+        (Vec3::new(-11.0, 4.6, 16.0), warm, true),    // under the arch
+        (Vec3::new(-19.0, 9.0, -7.0), green, false),  // pillar forest
+        (Vec3::new(-28.0, 11.2, -14.6), warm, false), // under the cube's cap
+        (Vec3::new(-20.6, 11.2, -22.0), cool, false),
+        (Vec3::new(-28.5, 6.5, 6.0), cool, false),    // top of the ramps
+    ];
+    let bulb = b.meshes.add(Sphere::new(0.12));
+    for (position, color, shadows) in lamps {
+        let glow = color.to_linear() * 12.0;
+        b.commands.spawn((
+            PointLight {
+                color,
+                intensity: 600_000.0,
+                range: 22.0,
+                shadow_maps_enabled: shadows,
+                ..default()
+            },
+            Transform::from_translation(position),
+            Mesh3d(bulb.clone()),
+            MeshMaterial3d(b.materials.add(StandardMaterial {
+                base_color: Color::BLACK,
+                emissive: glow,
+                ..default()
+            })),
+            bevy::light::NotShadowCaster,
+        ));
+    }
 }
 
 /// North: the original wall. Easy zigzag, a rest ledge, slick holds, a

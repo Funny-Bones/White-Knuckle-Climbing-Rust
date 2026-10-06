@@ -5,7 +5,7 @@ use bevy_rapier3d::parry::query::ShapeCastOptions;
 use bevy_rapier3d::parry::shape::Ball;
 use bevy_rapier3d::prelude::*;
 
-use crate::level::Handhold;
+use crate::level::{Handhold, Holds, WORLD_GROUP};
 use crate::player::{Hold, Player};
 use crate::tuning::*;
 use crate::view::{CursorLocked, PlayerCamera};
@@ -23,7 +23,7 @@ pub fn update_hands(
     rapier: ReadRapierContext,
     cameras: Query<&Transform, With<PlayerCamera>>,
     mut players: Query<(Entity, &mut Player)>,
-    holds: Query<(&GlobalTransform, &Handhold)>,
+    holds: Holds,
     mut aim: ResMut<AimTarget>,
 ) {
     let (Ok(camera), Ok((entity, mut player)), Ok(rapier)) =
@@ -36,7 +36,9 @@ pub fn update_hands(
     // Moving fast widens the catch radius.
     let radius = (player.speed_mps * 0.03).clamp(0.15, 0.3);
     let forward = camera.rotation * Vec3::NEG_Z;
-    aim.0 = find_handhold(&rapier, entity, camera.translation, forward, radius, &holds);
+    // Handholds win; failing that, the top edge of whatever is being looked at.
+    aim.0 = find_handhold(&rapier, entity, camera.translation, forward, radius, &holds)
+        .or_else(|| find_ledge(&rapier, entity, camera.translation, forward, radius));
 
     let is_grounded = player.is_grounded;
     let loss_rate = if player.hands.iter().all(|h| h.is_hanging()) {
@@ -72,7 +74,7 @@ pub fn update_hands(
                     if let Ok((_, handhold)) = holds.get(memory.entity) {
                         hand.hold = Some(memory);
                         hand.hold_time = 0.0;
-                        hand.drag_mult = handhold.drag_mult;
+                        hand.drag_mult = Handhold::or_ledge(handhold).drag_mult;
                     }
                 }
             }
@@ -82,7 +84,7 @@ pub fn update_hands(
         let strain = hand
             .hold
             .and_then(|hold| holds.get(hold.entity).ok())
-            .map(|(_, handhold)| handhold.strain_rate);
+            .map(|(_, handhold)| Handhold::or_ledge(handhold).strain_rate);
         if let Some(strain) = strain {
             hand.hold_time += dt;
             if is_grounded {
@@ -115,10 +117,10 @@ fn find_handhold(
     origin: Vec3,
     dir: Vec3,
     radius: f32,
-    holds: &Query<(&GlobalTransform, &Handhold)>,
+    holds: &Holds,
 ) -> Option<(Entity, Vec3)> {
     let not_player = QueryFilter::default().exclude_collider(player);
-    let is_hold = |entity: Entity| holds.contains(entity);
+    let is_hold = |entity: Entity| holds.get(entity).is_ok_and(|(_, handhold)| handhold.is_some());
     let sweep = |max_time_of_impact: f32| ShapeCastOptions {
         max_time_of_impact,
         target_distance: 0.0,
@@ -187,4 +189,75 @@ fn find_handhold(
         found.is_none()
     });
     found
+}
+
+/// How far in from the edge a ledge is tested and gripped.
+const LEDGE_INSET: f32 = 0.12;
+/// How far above the point being looked at a ledge's top may be.
+const LEDGE_RISE: f32 = 0.55;
+
+/// Finds a ledge to grab when looking along `dir`: a walkable top just above
+/// the wall under the crosshair, or the edge a swept sphere catches when
+/// aiming slightly over it.
+fn find_ledge(
+    rapier: &RapierContext,
+    player: Entity,
+    origin: Vec3,
+    dir: Vec3,
+    radius: f32,
+) -> Option<(Entity, Vec3)> {
+    let world = QueryFilter::default()
+        .exclude_collider(player)
+        .groups(CollisionGroups::new(Group::ALL, WORLD_GROUP));
+    let flat_dir = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
+
+    // The top of the surface at `point`, whose outward normal is `normal`.
+    let ledge_above = |point: Vec3, normal: Vec3| {
+        // Tops are stood on and undersides have no ledge; only walls count.
+        if normal.y > 0.7 || normal.y < -0.3 {
+            return None;
+        }
+        let outward = Vec3::new(normal.x, 0.0, normal.z);
+        let inward = if outward.length() > 0.2 { -outward.normalize() } else { flat_dir };
+        if inward == Vec3::ZERO {
+            return None;
+        }
+        // Drop a ray from above, just inside the wall. Starting inside solid
+        // rock means the wall carries on upward and there is no ledge here.
+        let above = point + inward * LEDGE_INSET + Vec3::Y * LEDGE_RISE;
+        let (entity, top) =
+            rapier.cast_ray_and_get_normal(above, Vec3::NEG_Y, LEDGE_RISE + 0.15, true, world)?;
+        if top.time_of_impact < 0.03 || top.normal.y < 0.7 {
+            return None;
+        }
+        // Grip close to the edge, and only where there is room for a hand.
+        let grip = top.point - inward * (LEDGE_INSET * 0.6);
+        if rapier.cast_ray(grip + Vec3::Y * 0.02, Vec3::Y, 0.3, true, world).is_some() {
+            return None;
+        }
+        (grip.distance(origin) <= INTERACT_DISTANCE).then_some((entity, grip))
+    };
+
+    if let Some((_, hit)) = rapier.cast_ray_and_get_normal(origin, dir, INTERACT_DISTANCE, true, world) {
+        if let Some(ledge) = ledge_above(hit.point, hit.normal) {
+            return Some(ledge);
+        }
+    }
+    let ball = Ball::new(radius);
+    let options = ShapeCastOptions {
+        max_time_of_impact: INTERACT_DISTANCE,
+        target_distance: 0.0,
+        stop_at_penetration: false,
+        compute_impact_geometry_on_penetration: true,
+    };
+    let (_, hit) = rapier.cast_shape(origin, Quat::IDENTITY, dir, &ball, options, world)?;
+    let details = hit.details?;
+    // Catching an edge gives a diagonal normal; treat it as the wall below.
+    // A normal that is nearly straight up is just the floor.
+    let wall_normal = Vec3::new(details.normal1.x, 0.0, details.normal1.z);
+    if details.normal1.y > 0.9 || wall_normal.length() < 0.2 {
+        return None;
+    }
+    let wall_normal = wall_normal.normalize();
+    ledge_above(details.witness1 - Vec3::Y * 0.05, wall_normal)
 }

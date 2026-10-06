@@ -1,12 +1,13 @@
 //! Everything the player sees: camera, hands, aim marker and HUD.
 
 use bevy::camera::visibility::RenderLayers;
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::hands::AimTarget;
-use crate::level::{Handhold, SPAWN_POS, SPAWN_YAW};
+use crate::level::{SPAWN_POS, SPAWN_YAW};
 use crate::player::{Player, PlayerState};
 use crate::tuning::*;
 
@@ -22,6 +23,10 @@ pub struct HandVisual {
     index: usize,
     /// Position in camera space, so a free hand follows the view exactly.
     local: Vec3,
+    /// Sideways tilt, eased towards whatever the current motion asks for.
+    roll: f32,
+    /// How long the player has been sprinting; the run pose waits a moment.
+    sprint_time: f32,
 }
 
 #[derive(Component)]
@@ -46,6 +51,8 @@ struct HandPoses {
     normal: Handle<Image>,
     open: Handle<Image>,
     grab: Handle<Image>,
+    crouch: Option<Handle<Image>>,
+    sprint: Option<Handle<Image>>,
 }
 
 /// Hands live on their own layer, drawn over the world so that walls and
@@ -53,8 +60,12 @@ struct HandPoses {
 const HAND_LAYER: usize = 1;
 
 const SPRITE_DIR: &str = "original";
-/// World size of a hand sprite.
-const SPRITE_SIZE: f32 = 0.34;
+/// World size of a hand sprite. Together with the rest position this puts the
+/// hands large in the bottom corners of the view, wrists off-screen.
+const SPRITE_SIZE: f32 = 0.38;
+const HAND_BUTTONS: [MouseButton; 2] = [MouseButton::Left, MouseButton::Right];
+/// Delay before sprinting switches the hands to the run pose.
+const RUN_POSE_DELAY: f32 = 0.3;
 
 const SKIN: Vec3 = Vec3::new(0.86, 0.70, 0.60);
 const STRAINED: Vec3 = Vec3::new(0.90, 0.12, 0.10);
@@ -62,7 +73,7 @@ const STRAINED: Vec3 = Vec3::new(0.90, 0.12, 0.10);
 fn hand_rest(index: usize, sprites: bool) -> Vec3 {
     let side = if index == 0 { -1.0 } else { 1.0 };
     if sprites {
-        Vec3::new(side * 0.42, -0.36, -0.62)
+        Vec3::new(side * 0.41, -0.44, -0.5)
     } else {
         Vec3::new(side * 0.34, -0.30, -0.62)
     }
@@ -78,10 +89,15 @@ fn load_hand_poses(asset_server: &AssetServer) -> Option<HandPoses> {
     if !poses.iter().all(|pose| root.join("assets").join(file(pose)).is_file()) {
         return None;
     }
+    let optional = |pose: &str| {
+        root.join("assets").join(file(pose)).is_file().then(|| asset_server.load(file(pose)))
+    };
     Some(HandPoses {
         normal: asset_server.load(file("normal")),
         open: asset_server.load(file("open")),
         grab: asset_server.load(file("grab")),
+        crouch: optional("crouch"),
+        sprint: optional("sprint"),
     })
 }
 
@@ -109,6 +125,8 @@ pub fn setup_view(
                 ..default()
             }),
             RenderLayers::layer(HAND_LAYER),
+            // The sprites are flat white pixel art; leave their colours alone.
+            Tonemapping::None,
         )],
     ));
 
@@ -135,7 +153,12 @@ pub fn setup_view(
             },
         };
         commands.spawn((
-            HandVisual { index, local: hand_rest(index, poses.is_some()) },
+            HandVisual {
+                index,
+                local: hand_rest(index, poses.is_some()),
+                roll: 0.0,
+                sprint_time: 0.0,
+            },
             Mesh3d(hand_mesh.clone()),
             MeshMaterial3d(materials.add(material)),
             Transform::default(),
@@ -170,9 +193,9 @@ pub fn setup_view(
         BackgroundColor(Color::WHITE),
     ));
 
-    // One grip bar per hand, either side of the screen centre.
+    // One grip bar per hand, at the bottom corners clear of the hands.
     for index in 0..2 {
-        let offset = Val::Percent(38.0);
+        let offset = Val::Px(24.0);
         let (left, right) = if index == 0 { (offset, Val::Auto) } else { (Val::Auto, offset) };
         commands
             .spawn((
@@ -291,10 +314,12 @@ pub fn camera_follow(
 
 pub fn update_hand_visuals(
     time: Res<Time>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    locked: Res<CursorLocked>,
     players: Query<&Player>,
     cameras: Query<&Transform, (With<PlayerCamera>, Without<HandVisual>)>,
-    holds: Query<&GlobalTransform, With<Handhold>>,
-    aim: Res<AimTarget>,
+    holds: Query<&GlobalTransform>,
     sprites: Res<HandSprites>,
     mut hands: Query<(&mut Transform, &mut HandVisual, &MeshMaterial3d<StandardMaterial>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -304,13 +329,24 @@ pub fn update_hand_visuals(
     };
     let poses = sprites.0.as_ref();
     let t = time.elapsed_secs();
+    let dt = time.delta_secs();
+    let speed = player.speed_mps.min(8.0);
+    let walking = player.is_grounded && speed > 0.1;
+    let sprinting = keys.pressed(KeyCode::ShiftLeft) && player.is_grounded && speed > 0.3;
+    let crouching = keys.pressed(KeyCode::ControlLeft);
+
     for (mut transform, mut visual, material) in &mut hands {
         let hand = &player.hands[visual.index];
+        let side = if visual.index == 0 { -1.0 } else { 1.0 };
         let fatigue = 1.0 - hand.grip_fraction();
+        let reaching = locked.0 && mouse.pressed(HAND_BUTTONS[visual.index]);
+        visual.sprint_time = if sprinting { visual.sprint_time + dt } else { 0.0 };
+        let running = visual.sprint_time > RUN_POSE_DELAY && !reaching;
         let held_point = hand
             .hold
             .and_then(|hold| Some(holds.get(hold.entity).ok()?.transform_point(hold.local)));
 
+        let mut roll = 0.0;
         if let Some(point) = held_point {
             // A tiring hand trembles on its hold.
             let seed = visual.index as f32 * 1.7;
@@ -322,38 +358,71 @@ pub fn update_hand_visuals(
             transform.translation = point + tremble;
             visual.local = camera.compute_affine().inverse().transform_point3(point);
         } else {
-            let ease = (time.delta_secs() * 14.0).min(1.0);
-            visual.local = visual.local.lerp(hand_rest(visual.index, poses.is_some()), ease);
+            let mut target = hand_rest(visual.index, poses.is_some());
+            // The two hands move half a cycle apart.
+            let offset = visual.index as f32 * std::f32::consts::PI;
+            if reaching {
+                // Held out towards whatever is ahead.
+                target += Vec3::new(-side * 0.14, 0.2, -0.06);
+            } else if running {
+                // Arms pump: up and forward, then down and back.
+                let phase = t * 11.0 + offset;
+                target += Vec3::new(0.0, 0.05 + 0.08 * phase.sin(), 0.07 * phase.cos());
+                roll = side * 0.18 * phase.sin();
+            } else if walking {
+                // Sway side to side, with a dip on each footfall.
+                let phase = t * 3.5 + offset * 0.5;
+                target += Vec3::new(
+                    side * 0.004 * speed * phase.sin(),
+                    0.006 * speed * (phase * 2.0).sin().abs(),
+                    0.0,
+                );
+                roll = side * 0.012 * speed * phase.sin();
+            } else if !player.is_grounded {
+                target.y += 0.05;
+            }
+            visual.local = visual.local.lerp(target, (dt * 12.0).min(1.0));
             transform.translation = camera.transform_point(visual.local);
         }
-        transform.rotation = camera.rotation;
-        let can_grab = !hand.is_hanging() && hand.grab_wait <= 0.0;
+        visual.roll += (roll - visual.roll) * (dt * 10.0).min(1.0);
+        transform.rotation = camera.rotation * Quat::from_rotation_z(visual.roll);
         transform.scale = match poses {
+            // The right hand is the left one mirrored.
             Some(_) if visual.index == 1 => Vec3::new(-1.0, 1.0, 1.0),
             Some(_) => Vec3::ONE,
             None if held_point.is_some() => Vec3::splat(0.85),
             None => Vec3::ONE,
         };
 
-        let base = if poses.is_some() { Vec3::ONE } else { SKIN };
-        let mut color = base.lerp(STRAINED, fatigue);
-        if !hand.is_hanging() && !can_grab {
-            color *= 0.45;
-        }
-        if let Some(mut material) = materials.get_mut(&material.0) {
-            material.base_color = Color::srgb(color.x, color.y, color.z);
-            if let Some(poses) = poses {
-                // Closed on a hold, open when one is in reach, relaxed otherwise.
+        let Some(mut material) = materials.get_mut(&material.0) else {
+            continue;
+        };
+        match poses {
+            Some(poses) => {
+                // As in the original: fist on a hold, open while the button is
+                // held, then crouch and run poses, relaxed otherwise.
                 let pose = if held_point.is_some() {
                     &poses.grab
-                } else if can_grab && aim.0.is_some() {
+                } else if reaching {
                     &poses.open
+                } else if crouching {
+                    poses.crouch.as_ref().unwrap_or(&poses.normal)
+                } else if running {
+                    poses.sprint.as_ref().unwrap_or(&poses.normal)
                 } else {
                     &poses.normal
                 };
                 if material.base_color_texture.as_ref() != Some(pose) {
                     material.base_color_texture = Some(pose.clone());
                 }
+            }
+            None => {
+                // Box hands have no poses, so colour carries the state instead.
+                let mut color = SKIN.lerp(STRAINED, fatigue);
+                if !hand.is_hanging() && hand.grab_wait > 0.0 {
+                    color *= 0.45;
+                }
+                material.base_color = Color::srgb(color.x, color.y, color.z);
             }
         }
     }

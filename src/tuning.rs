@@ -77,6 +77,8 @@ pub const CAPSULE_RADIUS: f32 = 0.45;
 pub const CAPSULE_HEIGHT: f32 = 2.25;
 /// Camera height above the body centre.
 pub const EYE_OFFSET: f32 = 0.675;
+/// How far the body is pulled down to stay on the ground while walking.
+pub const GROUND_SNAP: f32 = 0.15;
 /// Length of the ray used to find the ground under the body centre.
 pub const GROUND_PROBE: f32 = 1.5;
 
