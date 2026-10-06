@@ -8,7 +8,7 @@ use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use crate::level::Handhold;
 use crate::player::Player;
 use crate::tuning::EYE_OFFSET;
-use crate::view::CursorLocked;
+use crate::view::{CursorLocked, PlayerCamera};
 
 pub fn enabled() -> bool {
     std::env::var_os("WK_SELFTEST").is_some()
@@ -40,9 +40,13 @@ pub fn run(
     let eye = player.cur_pos + Vec3::Y * EYE_OFFSET;
     script.max_height = script.max_height.max(player.cur_pos.y);
 
-    // The n-th lowest handhold.
+    // The n-th lowest handhold of the main wall's first pitch.
     let hold_at = |n: usize| {
-        let mut points: Vec<Vec3> = holds.iter().map(|h| h.translation()).collect();
+        let mut points: Vec<Vec3> = holds
+            .iter()
+            .map(|h| h.translation())
+            .filter(|p| p.x.abs() < 1.0 && (-2.5..-1.5).contains(&p.z))
+            .collect();
         points.sort_by(|a, b| a.y.total_cmp(&b.y));
         points.get(n).copied()
     };
@@ -117,5 +121,40 @@ pub fn run(
             if player.hands[1].is_hanging() { "HOLD" } else { "free" },
             player.hands[1].grip,
         );
+    }
+}
+
+/// `WK_OVERVIEW=1` saves bird's-eye pictures of the whole level and exits.
+pub fn overview_enabled() -> bool {
+    std::env::var_os("WK_OVERVIEW").is_some()
+}
+
+pub fn overview(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut shots: Local<usize>,
+    mut cameras: Query<&mut Transform, With<PlayerCamera>>,
+) {
+    let views = [
+        (Vec3::new(0.0, 55.0, 70.0), Vec3::new(0.0, 8.0, 0.0)),
+        (Vec3::new(60.0, 40.0, -35.0), Vec3::new(5.0, 8.0, 5.0)),
+        (Vec3::new(-60.0, 35.0, 30.0), Vec3::new(-10.0, 6.0, 0.0)),
+        (Vec3::new(0.0, 14.0, 6.0), Vec3::new(8.0, 8.0, 30.0)),
+    ];
+    // Hold each view for a second so the picture is taken from a settled frame.
+    let t = time.elapsed_secs() - 1.0;
+    let index = (t.max(0.0)) as usize;
+    if index >= views.len() {
+        std::process::exit(0);
+    }
+    let Ok(mut camera) = cameras.single_mut() else {
+        return;
+    };
+    let (eye, target) = views[index];
+    *camera = Transform::from_translation(eye).looking_at(target, Vec3::Y);
+    if t.fract() > 0.5 && *shots == index {
+        let path = format!("target/overview_{index}.png");
+        commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
+        *shots += 1;
     }
 }

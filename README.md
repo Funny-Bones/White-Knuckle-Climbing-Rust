@@ -41,6 +41,32 @@ cargo run
 Not ported: items and tools (pitons, rebar, hammer), perks and buffs, moving
 handholds, crouch height, swimming, fall damage, footsteps and voice lines.
 
+## The test park
+
+The level (`src/level.rs`) is a flat greybox park. You start facing the main
+wall; everything else is a short walk away.
+
+| Structure | Where | What it tests |
+| --- | --- | --- |
+| Main wall | north | Zigzag, rest ledge, slick holds, spring jump, roof and lip |
+| Chimney | north-east | Crossing between two facing walls |
+| Ladder spire | far north-east | A 50 m climb that needs its rest ledges |
+| Twin towers | far east | All-slick holds; widely spaced spring holds |
+| Leaning slab | east | An overhang on one side, a lean-back climb on the other |
+| Hanging garden | south-east | Bars floating at mixed heights to swing between |
+| Traverse wall | south-east | A long sideways traverse above the ground |
+| Monkey bars | south | Hand over hand under a beam |
+| Spiral islands | far south | Floating platforms with a bar in each gap |
+| Arch | south-west | Up one leg, under the top, down the other |
+| Stepping blocks | south-west | Jumps of rising height |
+| Ramps | west | A walkable slope and a steep one to slide down |
+| Pillar forest | west | Nine pillars wrapped in spirals of holds |
+| Great cube | north-west | Holds on every side and under an overhanging cap |
+
+Yellow holds are normal, red ones burn grip 2.5x faster, green ones launch a
+stronger jump. `WK_OVERVIEW=1 cargo run` saves bird's-eye pictures of the park
+to `target/overview_*.png`.
+
 ## Hand sprites
 
 The hands are drawn with the game's own sprites if these files exist, and as

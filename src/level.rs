@@ -1,4 +1,7 @@
-//! Greybox test shaft: a wall of handholds, a rest ledge, and a roof to cross.
+//! Greybox test park: the original climbing wall plus a spread of structures
+//! that each exercise a different part of the climbing.
+
+use std::f32::consts::{PI, TAU};
 
 use bevy::prelude::*;
 use bevy_rapier3d::prelude::*;
@@ -11,8 +14,14 @@ pub const HANDHOLD_GROUP: Group = Group::GROUP_2;
 pub const SPAWN_POS: Vec3 = Vec3::new(0.0, 1.3, 3.0);
 pub const SPAWN_YAW: f32 = 0.0;
 
-/// Z of the climbing wall's face.
+/// Z of the main climbing wall's face.
 const WALL_FACE_Z: f32 = -2.0;
+/// Width, height and depth of a handhold, depth being how far it sticks out.
+const HOLD_SIZE: Vec3 = Vec3::new(0.5, 0.14, 0.3);
+/// Height of the lowest hold on most structures: reachable from the ground.
+const FIRST_HOLD: f32 = 2.3;
+/// Comfortable vertical spacing between holds.
+const HOLD_STEP: f32 = 1.3;
 
 /// Something a hand can hang from. Defaults match the original's handholds.
 #[derive(Component, Clone, Debug)]
@@ -50,47 +59,99 @@ impl Default for Handhold {
     }
 }
 
+impl Handhold {
+    /// Burns grip two and a half times as fast.
+    fn slick() -> Self {
+        Self { strain_rate: 2.5, ..default() }
+    }
+
+    /// Launches a stronger jump.
+    fn spring() -> Self {
+        Self { jump_mult: 1.5, ..default() }
+    }
+}
+
+struct Palette {
+    ground: Handle<StandardMaterial>,
+    wall: Handle<StandardMaterial>,
+    stone: Handle<StandardMaterial>,
+    ledge: Handle<StandardMaterial>,
+    ramp: Handle<StandardMaterial>,
+    hold: Handle<StandardMaterial>,
+    slick: Handle<StandardMaterial>,
+    spring: Handle<StandardMaterial>,
+    goal: Handle<StandardMaterial>,
+}
+
 struct Builder<'a, 'w, 's> {
     commands: &'a mut Commands<'w, 's>,
     meshes: &'a mut Assets<Mesh>,
+    palette: Palette,
 }
 
 impl Builder<'_, '_, '_> {
     fn block(&mut self, material: &Handle<StandardMaterial>, center: Vec3, size: Vec3) {
+        self.block_rotated(material, center, size, Quat::IDENTITY);
+    }
+
+    fn block_rotated(
+        &mut self,
+        material: &Handle<StandardMaterial>,
+        center: Vec3,
+        size: Vec3,
+        rotation: Quat,
+    ) {
         self.commands.spawn((
             Mesh3d(self.meshes.add(Cuboid::from_size(size))),
             MeshMaterial3d(material.clone()),
-            Transform::from_translation(center),
+            Transform::from_translation(center).with_rotation(rotation),
             Collider::cuboid(size.x * 0.5, size.y * 0.5, size.z * 0.5),
             CollisionGroups::new(WORLD_GROUP, Group::ALL),
         ));
     }
 
-    fn hold(
-        &mut self,
-        material: &Handle<StandardMaterial>,
-        center: Vec3,
-        size: Vec3,
-        handhold: Handhold,
-    ) {
+    /// A handhold box; its local Z is the direction it sticks out in.
+    fn hold_box(&mut self, center: Vec3, size: Vec3, rotation: Quat, handhold: Handhold) {
+        let material = if handhold.strain_rate > 1.0 {
+            &self.palette.slick
+        } else if handhold.jump_mult > 1.0 {
+            &self.palette.spring
+        } else {
+            &self.palette.hold
+        };
         self.commands.spawn((
             Mesh3d(self.meshes.add(Cuboid::from_size(size))),
             MeshMaterial3d(material.clone()),
-            Transform::from_translation(center),
+            Transform::from_translation(center).with_rotation(rotation),
             Collider::cuboid(size.x * 0.5, size.y * 0.5, size.z * 0.5),
             CollisionGroups::new(HANDHOLD_GROUP, Group::ALL),
             handhold,
         ));
     }
 
-    /// A hold sticking out of the main wall.
-    fn wall_hold(&mut self, material: &Handle<StandardMaterial>, x: f32, y: f32, handhold: Handhold) {
-        self.hold(
-            material,
-            Vec3::new(x, y, WALL_FACE_Z + 0.13),
-            Vec3::new(0.5, 0.14, 0.3),
-            handhold,
-        );
+    /// A hold sticking out of a surface at `point`, along the surface `normal`.
+    fn hold(&mut self, point: Vec3, normal: Vec3, handhold: Handhold) {
+        let rotation = Quat::from_rotation_arc(Vec3::Z, normal);
+        self.hold_box(point + normal * (HOLD_SIZE.z * 0.5 - 0.02), HOLD_SIZE, rotation, handhold);
+    }
+
+    /// A hold on the main wall.
+    fn wall_hold(&mut self, x: f32, y: f32, handhold: Handhold) {
+        self.hold(Vec3::new(x, y, WALL_FACE_Z), Vec3::Z, handhold);
+    }
+
+    /// A bar floating in the air, grabbable from any side.
+    fn floating_hold(&mut self, center: Vec3, yaw: f32, handhold: Handhold) {
+        self.hold_box(center, Vec3::new(0.9, 0.14, 0.3), Quat::from_rotation_y(yaw), handhold);
+    }
+
+    /// A straight column of holds up a vertical face.
+    fn ladder(&mut self, base: Vec3, normal: Vec3, top: f32, step: f32, handhold: Handhold) {
+        let mut y = FIRST_HOLD;
+        while y <= top {
+            self.hold(Vec3::new(base.x, y, base.z), normal, handhold.clone());
+            y += step;
+        }
     }
 }
 
@@ -106,75 +167,36 @@ pub fn setup_level(
             ..default()
         })
     };
-    let ground = solid(0.16, 0.17, 0.19);
-    let wall = solid(0.30, 0.31, 0.34);
-    let ledge = solid(0.22, 0.26, 0.32);
-    let hold = solid(0.95, 0.72, 0.18);
-    let slick = solid(0.85, 0.22, 0.20);
-    let spring = solid(0.25, 0.80, 0.40);
-    let goal = solid(1.0, 0.9, 0.35);
+    let palette = Palette {
+        ground: solid(0.16, 0.17, 0.19),
+        wall: solid(0.30, 0.31, 0.34),
+        stone: solid(0.38, 0.36, 0.33),
+        ledge: solid(0.22, 0.26, 0.32),
+        ramp: solid(0.28, 0.33, 0.30),
+        hold: solid(0.95, 0.72, 0.18),
+        slick: solid(0.85, 0.22, 0.20),
+        spring: solid(0.25, 0.80, 0.40),
+        goal: solid(1.0, 0.9, 0.35),
+    };
+    let mut b = Builder { commands: &mut commands, meshes: &mut meshes, palette };
 
-    let mut b = Builder { commands: &mut commands, meshes: &mut meshes };
+    let ground = b.palette.ground.clone();
+    b.block(&ground, Vec3::new(0.0, -0.5, 0.0), Vec3::new(160.0, 1.0, 160.0));
 
-    b.block(&ground, Vec3::new(0.0, -0.5, 0.0), Vec3::new(60.0, 1.0, 60.0));
-    b.block(&wall, Vec3::new(0.0, 20.0, WALL_FACE_Z - 2.0), Vec3::new(14.0, 40.0, 4.0));
-
-    // First pitch: an easy zigzag.
-    for i in 0..9 {
-        let x = if i % 2 == 0 { -0.45 } else { 0.45 };
-        b.wall_hold(&hold, x, 2.3 + 1.3 * i as f32, Handhold::default());
-    }
-
-    // Traverse right onto a ledge where grip recovers.
-    b.wall_hold(&hold, 1.3, 13.4, Handhold::default());
-    b.wall_hold(&hold, 2.0, 14.5, Handhold::default());
-    b.wall_hold(&hold, 3.0, 15.8, Handhold::default());
-    b.block(&ledge, Vec3::new(3.2, 13.6, -1.0), Vec3::new(3.0, 0.4, 2.0));
-
-    // Second pitch: slick holds that burn grip two and a half times as fast.
-    for i in 0..4 {
-        b.wall_hold(
-            &slick,
-            3.8,
-            16.9 + 1.3 * i as f32,
-            Handhold { strain_rate: 2.5, ..default() },
-        );
-    }
-
-    // A springy hold to launch across the gap above it.
-    b.wall_hold(&spring, 3.2, 22.1, Handhold { jump_mult: 1.5, ..default() });
-    b.wall_hold(&hold, 2.6, 25.4, Handhold::default());
-    b.wall_hold(&hold, 1.8, 26.4, Handhold::default());
-    b.wall_hold(&hold, 1.2, 27.3, Handhold::default());
-
-    // Roof: cross underneath, then over the lip.
-    let roof_center = Vec3::new(0.0, 28.5, 0.0);
-    let roof_size = Vec3::new(14.0, 0.6, 4.0);
-    b.block(&wall, roof_center, roof_size);
-    let underside = roof_center.y - roof_size.y * 0.5;
-    for (x, z) in [(1.2, -1.2), (0.9, -0.3), (1.2, 0.6), (0.9, 1.5)] {
-        b.hold(
-            &hold,
-            Vec3::new(x, underside - 0.07, z),
-            Vec3::new(0.5, 0.14, 0.5),
-            Handhold::default(),
-        );
-    }
-    let lip_z = roof_center.z + roof_size.z * 0.5;
-    b.hold(
-        &hold,
-        Vec3::new(1.0, roof_center.y, lip_z + 0.13),
-        Vec3::new(0.6, 0.14, 0.3),
-        Handhold::default(),
-    );
-    let top = roof_center.y + roof_size.y * 0.5;
-    b.hold(
-        &hold,
-        Vec3::new(1.0, top + 0.07, lip_z - 0.6),
-        Vec3::new(0.5, 0.14, 0.3),
-        Handhold::default(),
-    );
-    b.block(&goal, Vec3::new(0.0, top + 0.5, -0.5), Vec3::new(1.0, 1.0, 1.0));
+    main_wall(&mut b);
+    chimney(&mut b);
+    pillar_forest(&mut b);
+    monkey_bars(&mut b);
+    leaning_slab(&mut b);
+    ramps(&mut b);
+    spiral_islands(&mut b);
+    ladder_spire(&mut b);
+    arch(&mut b);
+    stepping_blocks(&mut b);
+    twin_towers(&mut b);
+    traverse_wall(&mut b);
+    hanging_garden(&mut b);
+    great_cube(&mut b);
 
     commands.spawn((
         DirectionalLight { illuminance: 9000.0, ..default() },
@@ -184,4 +206,294 @@ pub fn setup_level(
         brightness: 350.0,
         ..default()
     });
+}
+
+/// North: the original wall. Easy zigzag, a rest ledge, slick holds, a
+/// spring jump, then under a roof and over its lip.
+fn main_wall(b: &mut Builder) {
+    let (wall, ledge, goal) = (b.palette.wall.clone(), b.palette.ledge.clone(), b.palette.goal.clone());
+    b.block(&wall, Vec3::new(0.0, 20.0, WALL_FACE_Z - 2.0), Vec3::new(14.0, 40.0, 4.0));
+
+    for i in 0..9 {
+        let x = if i % 2 == 0 { -0.45 } else { 0.45 };
+        b.wall_hold(x, FIRST_HOLD + HOLD_STEP * i as f32, Handhold::default());
+    }
+
+    b.wall_hold(1.3, 13.4, Handhold::default());
+    b.wall_hold(2.0, 14.5, Handhold::default());
+    b.wall_hold(3.0, 15.8, Handhold::default());
+    b.block(&ledge, Vec3::new(3.2, 13.6, -1.0), Vec3::new(3.0, 0.4, 2.0));
+
+    for i in 0..4 {
+        b.wall_hold(3.8, 16.9 + HOLD_STEP * i as f32, Handhold::slick());
+    }
+    b.wall_hold(3.2, 22.1, Handhold::spring());
+    b.wall_hold(2.6, 25.4, Handhold::default());
+    b.wall_hold(1.8, 26.4, Handhold::default());
+    b.wall_hold(1.2, 27.3, Handhold::default());
+
+    let roof_center = Vec3::new(0.0, 28.5, 0.0);
+    let roof_size = Vec3::new(14.0, 0.6, 4.0);
+    b.block(&wall, roof_center, roof_size);
+    let underside = roof_center.y - roof_size.y * 0.5;
+    for (x, z) in [(1.2, -1.2), (0.9, -0.3), (1.2, 0.6), (0.9, 1.5)] {
+        b.hold(Vec3::new(x, underside, z), Vec3::NEG_Y, Handhold::default());
+    }
+    let lip_z = roof_center.z + roof_size.z * 0.5;
+    let top = roof_center.y + roof_size.y * 0.5;
+    b.hold(Vec3::new(1.0, roof_center.y, lip_z), Vec3::Z, Handhold::default());
+    b.hold(Vec3::new(1.0, top, lip_z - 0.6), Vec3::Y, Handhold::default());
+    b.block(&goal, Vec3::new(0.0, top + 0.5, -0.5), Vec3::new(1.0, 1.0, 1.0));
+}
+
+/// East of the wall: two facing walls to climb by crossing from one to the other.
+fn chimney(b: &mut Builder) {
+    let stone = b.palette.stone.clone();
+    let height = 20.0;
+    let (left_face, right_face) = (12.5, 15.0);
+    b.block(&stone, Vec3::new(left_face - 0.5, height * 0.5, -4.0), Vec3::new(1.0, height, 6.0));
+    b.block(&stone, Vec3::new(right_face + 0.5, height * 0.5, -4.0), Vec3::new(1.0, height, 6.0));
+    for i in 0..8 {
+        let y = FIRST_HOLD + 2.4 * i as f32;
+        b.hold(Vec3::new(left_face, y, -4.0), Vec3::X, Handhold::default());
+        if y + 1.2 < height {
+            b.hold(Vec3::new(right_face, y + 1.2, -4.0), Vec3::NEG_X, Handhold::default());
+        }
+    }
+}
+
+/// West: nine pillars of rising height, each wrapped in a spiral of holds.
+/// The tops are close enough to jump between.
+fn pillar_forest(b: &mut Builder) {
+    let stone = b.palette.stone.clone();
+    let width = 1.6;
+    let faces = [Vec3::Z, Vec3::X, Vec3::NEG_Z, Vec3::NEG_X];
+    for row in 0..3 {
+        for col in 0..3 {
+            let index = row * 3 + col;
+            let height = 4.0 + 2.5 * index as f32;
+            let (x, z) = (-14.0 - 5.0 * col as f32, -2.0 - 5.0 * row as f32);
+            b.block(&stone, Vec3::new(x, height * 0.5, z), Vec3::new(width, height, width));
+            let mut step = 0;
+            loop {
+                let y = FIRST_HOLD + HOLD_STEP * step as f32;
+                if y > height - 0.3 {
+                    break;
+                }
+                let normal = faces[(step + index) % 4];
+                b.hold(Vec3::new(x, y, z) + normal * width * 0.5, normal, Handhold::default());
+                step += 1;
+            }
+        }
+    }
+}
+
+/// South of the spawn: two towers joined by a beam to cross hand over hand.
+fn monkey_bars(b: &mut Builder) {
+    let (wall, ledge) = (b.palette.wall.clone(), b.palette.ledge.clone());
+    let (z, height) = (12.0, 8.0);
+    for x in [-6.0, 6.0] {
+        b.block(&wall, Vec3::new(x, height * 0.5, z), Vec3::new(2.0, height, 2.0));
+        b.ladder(Vec3::new(x, 0.0, z - 1.0), Vec3::NEG_Z, height - 0.4, HOLD_STEP, Handhold::default());
+    }
+    let beam_y = height + 2.6;
+    b.block(&ledge, Vec3::new(0.0, beam_y, z), Vec3::new(10.0, 0.4, 0.6));
+    for i in 0..8 {
+        let x = -4.4 + 8.8 * i as f32 / 7.0;
+        b.hold(Vec3::new(x, beam_y - 0.2, z), Vec3::NEG_Y, Handhold::default());
+    }
+}
+
+/// East: a slab leaning 20 degrees. One side overhangs, the other is an easy
+/// lean-back climb.
+fn leaning_slab(b: &mut Builder) {
+    let wall = b.palette.wall.clone();
+    let size = Vec3::new(6.0, 14.0, 0.8);
+    let rotation = Quat::from_rotation_x(20f32.to_radians());
+    let center = Vec3::new(20.0, 6.7, 8.0);
+    b.block_rotated(&wall, center, size, rotation);
+    let mut i = 0;
+    let mut v = -4.6;
+    while v < size.y * 0.5 {
+        let u = if i % 2 == 0 { -0.5 } else { 0.5 };
+        // Overhanging face.
+        let normal = rotation * Vec3::Z;
+        b.hold(center + rotation * Vec3::new(u - 1.5, v, size.z * 0.5), normal, Handhold::default());
+        // Lean-back face.
+        b.hold(center + rotation * Vec3::new(u + 1.5, v, -size.z * 0.5), -normal, Handhold::default());
+        v += 1.2;
+        i += 1;
+    }
+}
+
+/// West: a ramp to walk up and a steep one to slide down, each to a platform.
+fn ramps(b: &mut Builder) {
+    let (ramp, ledge) = (b.palette.ramp.clone(), b.palette.ledge.clone());
+    for (x, length, degrees) in [(-26.0, 10.0, 30.0f32), (-31.0, 8.0, 62.0)] {
+        let angle = degrees.to_radians();
+        let low_z = 14.0;
+        let rise = length * angle.sin();
+        let run = length * angle.cos();
+        b.block_rotated(
+            &ramp,
+            Vec3::new(x, rise * 0.5, low_z - run * 0.5),
+            Vec3::new(3.0, 0.3, length),
+            Quat::from_rotation_x(angle),
+        );
+        b.block(&ledge, Vec3::new(x, rise - 0.25, low_z - run - 1.5), Vec3::new(3.0, 0.5, 3.0));
+        // A way back up for the steep one.
+        b.ladder(Vec3::new(x, 0.0, low_z - run - 3.0), Vec3::NEG_Z, rise - 0.6, HOLD_STEP, Handhold::default());
+        b.block(&ledge, Vec3::new(x, (rise - 0.5) * 0.5, low_z - run - 2.9), Vec3::new(1.0, rise - 0.5, 0.2));
+    }
+}
+
+/// Far south: floating platforms spiralling upward, with a bar to swing from
+/// in each gap.
+fn spiral_islands(b: &mut Builder) {
+    let (ledge, goal) = (b.palette.ledge.clone(), b.palette.goal.clone());
+    let center = Vec3::new(0.0, 0.0, 32.0);
+    let radius = 8.0;
+    let count = 12;
+    let island = |i: usize| {
+        let angle = TAU * i as f32 / 9.0;
+        center + Vec3::new(angle.sin() * radius, 1.2 + 2.2 * i as f32, -angle.cos() * radius)
+    };
+    for i in 0..count {
+        let pos = island(i);
+        let material = if i == count - 1 { &goal } else { &ledge };
+        b.block(material, pos, Vec3::new(2.4, 0.4, 2.4));
+        if i + 1 < count {
+            let next = island(i + 1);
+            let middle = (pos + next) * 0.5;
+            let yaw = (next.x - pos.x).atan2(next.z - pos.z) + PI * 0.5;
+            b.floating_hold(Vec3::new(middle.x, next.y + 1.6, middle.z), yaw, Handhold::default());
+        }
+    }
+}
+
+/// North-east: a fifty metre spire. Longer than two hands of grip, so the
+/// rest ledges matter.
+fn ladder_spire(b: &mut Builder) {
+    let (stone, ledge, goal) = (b.palette.stone.clone(), b.palette.ledge.clone(), b.palette.goal.clone());
+    let (x, z, height, width) = (24.0, -14.0, 50.0, 1.4);
+    b.block(&stone, Vec3::new(x, height * 0.5, z), Vec3::new(width, height, width));
+    let face = Vec3::new(x, 0.0, z + width * 0.5);
+    b.ladder(face, Vec3::Z, height - 0.2, 1.5, Handhold::default());
+    for rest in [12.0, 24.0, 36.0] {
+        b.block(&ledge, Vec3::new(x + 1.3, rest, z + width * 0.5 + 0.5), Vec3::new(1.6, 0.3, 1.2));
+    }
+    b.block(&goal, Vec3::new(x, height + 0.3, z), Vec3::splat(0.6));
+}
+
+/// South-west: an arch to climb up one leg, cross under, and down the other.
+fn arch(b: &mut Builder) {
+    let stone = b.palette.stone.clone();
+    let (z, leg_height) = (16.0, 6.0);
+    for x in [-14.0, -8.0] {
+        b.block(&stone, Vec3::new(x, leg_height * 0.5, z), Vec3::new(1.5, leg_height, 1.5));
+        b.ladder(Vec3::new(x, 0.0, z - 0.75), Vec3::NEG_Z, leg_height - 0.5, HOLD_STEP, Handhold::default());
+    }
+    b.block(&stone, Vec3::new(-11.0, leg_height + 0.4, z), Vec3::new(7.5, 0.8, 1.5));
+    for i in 0..4 {
+        b.hold(Vec3::new(-12.5 + i as f32, leg_height, z), Vec3::NEG_Y, Handhold::default());
+    }
+}
+
+/// South-west: a row of blocks, each a little taller than the last.
+fn stepping_blocks(b: &mut Builder) {
+    let ramp = b.palette.ramp.clone();
+    for i in 0..8 {
+        let height = 0.6 * (i + 1) as f32;
+        b.block(
+            &ramp,
+            Vec3::new(-32.0 + 3.2 * i as f32, height * 0.5, 22.0),
+            Vec3::new(1.6, height, 1.6),
+        );
+    }
+}
+
+/// Far east: one tower of slick holds, one of widely spaced spring holds.
+fn twin_towers(b: &mut Builder) {
+    let wall = b.palette.wall.clone();
+    let (x, height) = (30.0, 24.0);
+    for (z, step, handhold) in [(-2.0, HOLD_STEP, Handhold::slick()), (4.0, 3.4, Handhold::spring())] {
+        b.block(&wall, Vec3::new(x, height * 0.5, z), Vec3::new(2.0, height, 2.0));
+        b.ladder(Vec3::new(x - 1.0, 0.0, z), Vec3::NEG_X, height - 0.3, step, handhold);
+    }
+    // A bridge between the tops.
+    b.block(&wall, Vec3::new(x, height - 0.2, 1.0), Vec3::new(1.0, 0.4, 4.0));
+}
+
+/// South-east: a long sideways traverse well above the ground.
+fn traverse_wall(b: &mut Builder) {
+    let (wall, ledge) = (b.palette.wall.clone(), b.palette.ledge.clone());
+    let (center_x, face_z) = (20.0, 21.5);
+    b.block(&wall, Vec3::new(center_x, 5.0, face_z + 0.5), Vec3::new(16.0, 10.0, 1.0));
+    b.ladder(Vec3::new(13.0, 0.0, face_z), Vec3::NEG_Z, 6.0, HOLD_STEP, Handhold::default());
+    for i in 0..11 {
+        let x = 14.2 + 1.2 * i as f32;
+        let y = 6.2 + (i as f32 * 0.9).sin() * 0.5;
+        b.hold(Vec3::new(x, y, face_z), Vec3::NEG_Z, Handhold::default());
+    }
+    b.block(&ledge, Vec3::new(27.2, 5.0, face_z - 0.6), Vec3::new(1.4, 0.3, 1.2));
+}
+
+/// Overhead near the spawn: a field of bars hanging in the air at mixed
+/// heights, for swinging and jumping between.
+fn hanging_garden(b: &mut Builder) {
+    let ledge = b.palette.ledge.clone();
+    b.block(&ledge, Vec3::new(10.0, 0.75, 14.0), Vec3::new(2.0, 1.5, 2.0));
+    for row in 0..4 {
+        for col in 0..5 {
+            let i = row * 5 + col;
+            let height = 4.2 + ((i * 7) % 5) as f32 * 0.7 + row as f32 * 1.4;
+            let pos = Vec3::new(10.0 + col as f32 * 2.6, height, 14.0 + 2.4 * row as f32);
+            let handhold = match i % 7 {
+                3 => Handhold::slick(),
+                5 => Handhold::spring(),
+                _ => Handhold::default(),
+            };
+            b.floating_hold(pos, if i % 2 == 0 { 0.0 } else { PI * 0.5 }, handhold);
+        }
+    }
+}
+
+/// North-west: a big cube with holds scattered over every side and a ring of
+/// holds under an overhanging cap.
+fn great_cube(b: &mut Builder) {
+    let (wall, ledge) = (b.palette.wall.clone(), b.palette.ledge.clone());
+    let center = Vec3::new(-28.0, 6.0, -22.0);
+    let side = 12.0;
+    b.block(&wall, center, Vec3::splat(side));
+    let half = side * 0.5;
+    for (face, normal) in [Vec3::Z, Vec3::X, Vec3::NEG_Z, Vec3::NEG_X].into_iter().enumerate() {
+        let along = Vec3::Y.cross(normal);
+        for row in 0..8 {
+            for col in 0..4 {
+                // Skip some so every face reads differently.
+                if (row * 3 + col * 5 + face) % 4 == 0 {
+                    continue;
+                }
+                let offset = -3.9 + 2.6 * col as f32 + if row % 2 == 0 { 0.0 } else { 0.9 };
+                let y = FIRST_HOLD + HOLD_STEP * row as f32;
+                let point = Vec3::new(center.x, y, center.z) + normal * half + along * offset;
+                b.hold(point, normal, Handhold::default());
+            }
+        }
+    }
+    // The cap overhangs by a metre and a half all round.
+    let cap_y = side + 0.3;
+    b.block(&ledge, Vec3::new(center.x, cap_y, center.z), Vec3::new(side + 3.0, 0.6, side + 3.0));
+    for normal in [Vec3::Z, Vec3::X, Vec3::NEG_Z, Vec3::NEG_X] {
+        let along = Vec3::Y.cross(normal);
+        for i in 0..5 {
+            let point = Vec3::new(center.x, side, center.z)
+                + normal * (half + 0.75)
+                + along * (-4.8 + 2.4 * i as f32);
+            b.hold(point, Vec3::NEG_Y, Handhold::default());
+        }
+        let lip = Vec3::new(center.x, cap_y, center.z) + normal * (half + 1.5);
+        b.hold(lip, normal, Handhold::default());
+        b.hold(lip + Vec3::Y * 0.3 - normal * 0.6, Vec3::Y, Handhold::default());
+    }
 }

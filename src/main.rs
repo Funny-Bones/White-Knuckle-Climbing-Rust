@@ -47,6 +47,7 @@ fn main() {
             audio::play_sounds,
             view::update_hand_visuals,
             view::update_hud,
+            selftest::overview.run_if(selftest::overview_enabled),
         )
             .chain(),
     );
