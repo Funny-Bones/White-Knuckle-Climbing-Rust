@@ -1,5 +1,6 @@
 //! Everything the player sees: camera, hands, aim marker and HUD.
 
+use bevy::camera::visibility::RenderLayers;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
@@ -35,18 +36,60 @@ pub struct GripBar(usize);
 #[derive(Component)]
 pub struct StatusText;
 
+/// The game's own hand art, when it has been extracted into
+/// `assets/original` (it is not part of this repository). Without it the
+/// hands are drawn as plain boxes.
+#[derive(Resource, Default)]
+pub struct HandSprites(Option<HandPoses>);
+
+struct HandPoses {
+    normal: Handle<Image>,
+    open: Handle<Image>,
+    grab: Handle<Image>,
+}
+
+/// Hands live on their own layer, drawn over the world so that walls and
+/// holds never hide them.
+const HAND_LAYER: usize = 1;
+
+const SPRITE_DIR: &str = "original";
+/// World size of a hand sprite.
+const SPRITE_SIZE: f32 = 0.34;
+
 const SKIN: Vec3 = Vec3::new(0.86, 0.70, 0.60);
 const STRAINED: Vec3 = Vec3::new(0.90, 0.12, 0.10);
 
-fn hand_rest(index: usize) -> Vec3 {
+fn hand_rest(index: usize, sprites: bool) -> Vec3 {
     let side = if index == 0 { -1.0 } else { 1.0 };
-    Vec3::new(side * 0.34, -0.30, -0.62)
+    if sprites {
+        Vec3::new(side * 0.42, -0.36, -0.62)
+    } else {
+        Vec3::new(side * 0.34, -0.30, -0.62)
+    }
+}
+
+fn load_hand_poses(asset_server: &AssetServer) -> Option<HandPoses> {
+    // Same root Bevy resolves asset paths against under `cargo run`.
+    let root = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let file = |pose: &str| format!("{SPRITE_DIR}/hand_background_{pose}.png");
+    let poses = ["normal", "open", "grab"];
+    if !poses.iter().all(|pose| root.join("assets").join(file(pose)).is_file()) {
+        return None;
+    }
+    Some(HandPoses {
+        normal: asset_server.load(file("normal")),
+        open: asset_server.load(file("open")),
+        grab: asset_server.load(file("grab")),
+    })
 }
 
 pub fn setup_view(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    asset_server: Res<AssetServer>,
 ) {
     commands.spawn((
         PlayerCamera,
@@ -57,25 +100,53 @@ pub fn setup_view(
             ..default()
         }),
         Transform::from_translation(SPAWN_POS + Vec3::Y * EYE_OFFSET),
+        children![(
+            Camera3d::default(),
+            Camera { order: 1, clear_color: ClearColorConfig::None, ..default() },
+            Projection::Perspective(PerspectiveProjection {
+                fov: FOV_DEG.to_radians(),
+                near: 0.05,
+                ..default()
+            }),
+            RenderLayers::layer(HAND_LAYER),
+        )],
     ));
 
-    let hand_mesh = meshes.add(Cuboid::new(0.13, 0.17, 0.07));
+    let poses = load_hand_poses(&asset_server);
+    let hand_mesh = match poses {
+        Some(_) => meshes.add(Rectangle::new(SPRITE_SIZE, SPRITE_SIZE)),
+        None => meshes.add(Cuboid::new(0.13, 0.17, 0.07)),
+    };
     for index in 0..2 {
-        commands.spawn((
-            HandVisual { index, local: hand_rest(index) },
-            Mesh3d(hand_mesh.clone()),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::srgb(SKIN.x, SKIN.y, SKIN.z),
-                perceptual_roughness: 0.8,
+        let material = match &poses {
+            Some(poses) => StandardMaterial {
+                base_color_texture: Some(poses.normal.clone()),
+                unlit: true,
+                alpha_mode: AlphaMode::Mask(0.5),
+                // The right hand is the left one mirrored, which flips its facing.
+                cull_mode: None,
+                double_sided: true,
                 ..default()
-            })),
+            },
+            None => StandardMaterial {
+                base_color: Color::srgb(SKIN.x, SKIN.y, SKIN.z),
+                unlit: true,
+                ..default()
+            },
+        };
+        commands.spawn((
+            HandVisual { index, local: hand_rest(index, poses.is_some()) },
+            Mesh3d(hand_mesh.clone()),
+            MeshMaterial3d(materials.add(material)),
             Transform::default(),
+            RenderLayers::layer(HAND_LAYER),
         ));
     }
+    commands.insert_resource(HandSprites(poses));
 
     commands.spawn((
         AimMarker,
-        Mesh3d(meshes.add(Sphere::new(0.05))),
+        Mesh3d(meshes.add(Sphere::new(0.025))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 1.0, 0.6),
             unlit: true,
@@ -223,12 +294,15 @@ pub fn update_hand_visuals(
     players: Query<&Player>,
     cameras: Query<&Transform, (With<PlayerCamera>, Without<HandVisual>)>,
     holds: Query<&GlobalTransform, With<Handhold>>,
+    aim: Res<AimTarget>,
+    sprites: Res<HandSprites>,
     mut hands: Query<(&mut Transform, &mut HandVisual, &MeshMaterial3d<StandardMaterial>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let (Ok(player), Ok(camera)) = (players.single(), cameras.single()) else {
         return;
     };
+    let poses = sprites.0.as_ref();
     let t = time.elapsed_secs();
     for (mut transform, mut visual, material) in &mut hands {
         let hand = &player.hands[visual.index];
@@ -246,22 +320,41 @@ pub fn update_hand_visuals(
                 (t * 53.0 + seed + 2.1).sin(),
             ) * fatigue * 0.02;
             transform.translation = point + tremble;
-            transform.scale = Vec3::splat(0.85);
             visual.local = camera.compute_affine().inverse().transform_point3(point);
         } else {
             let ease = (time.delta_secs() * 14.0).min(1.0);
-            visual.local = visual.local.lerp(hand_rest(visual.index), ease);
+            visual.local = visual.local.lerp(hand_rest(visual.index, poses.is_some()), ease);
             transform.translation = camera.transform_point(visual.local);
-            transform.scale = Vec3::ONE;
         }
         transform.rotation = camera.rotation;
+        let can_grab = !hand.is_hanging() && hand.grab_wait <= 0.0;
+        transform.scale = match poses {
+            Some(_) if visual.index == 1 => Vec3::new(-1.0, 1.0, 1.0),
+            Some(_) => Vec3::ONE,
+            None if held_point.is_some() => Vec3::splat(0.85),
+            None => Vec3::ONE,
+        };
 
-        let mut color = SKIN.lerp(STRAINED, fatigue);
-        if !hand.is_hanging() && hand.grab_wait > 0.0 {
+        let base = if poses.is_some() { Vec3::ONE } else { SKIN };
+        let mut color = base.lerp(STRAINED, fatigue);
+        if !hand.is_hanging() && !can_grab {
             color *= 0.45;
         }
         if let Some(mut material) = materials.get_mut(&material.0) {
             material.base_color = Color::srgb(color.x, color.y, color.z);
+            if let Some(poses) = poses {
+                // Closed on a hold, open when one is in reach, relaxed otherwise.
+                let pose = if held_point.is_some() {
+                    &poses.grab
+                } else if can_grab && aim.0.is_some() {
+                    &poses.open
+                } else {
+                    &poses.normal
+                };
+                if material.base_color_texture.as_ref() != Some(pose) {
+                    material.base_color_texture = Some(pose.clone());
+                }
+            }
         }
     }
 }

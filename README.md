@@ -39,8 +39,37 @@ cargo run
   level burn grip 2.5x faster; the green one launches a stronger jump.
 
 Not ported: items and tools (pitons, rebar, hammer), perks and buffs, moving
-handholds, crouch height, swimming, fall damage, and the game's sprite hands
-and audio.
+handholds, crouch height, swimming, fall damage, footsteps and voice lines.
+
+## Hand sprites
+
+The hands are drawn with the game's own sprites if these files exist, and as
+plain boxes otherwise:
+
+```
+assets/original/hand_background_normal.png
+assets/original/hand_background_open.png
+assets/original/hand_background_grab.png
+```
+
+They are the 128x128 cells of the game's `Hands_Background_Sprite_Library_01`
+texture. That art belongs to the game, so `assets/original` is git-ignored and
+is not part of this repository; extract it from your own copy.
+
+## Sounds
+
+Grabbing, letting go, losing your grip, jumping, mantling, landing and the
+fatigue loop each play the game's own clip, at the volume and pitch range the
+game uses, if the clip exists as a WAV in `assets/original/audio/`:
+
+```
+climb1-4  letgo1-3  player_climbing_griplost  hand_fatigue_new
+player_fem_jump1-3  mantle1  landsoft2_new  land_medium1-3
+player_fem_land_heavy_01-02
+```
+
+Like the sprites, these belong to the game and are git-ignored. Any clip that
+is missing is simply skipped, so the game runs silent without them.
 
 ## Where the numbers come from
 
@@ -54,4 +83,4 @@ override them.
 
 `WK_SELFTEST=1 cargo run` plays a short scripted climb (walk to the wall, grab,
 pull up, second hand, jump) and logs the body's position and grip each quarter
-second, then exits.
+second, then exits. It also saves three screenshots to `target/selftest_*.png`.

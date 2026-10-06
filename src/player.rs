@@ -87,6 +87,8 @@ pub struct Player {
     pub cur_pos: Vec3,
     /// Actual speed over the last tick, in metres per second.
     pub speed_mps: f32,
+    /// Number of jumps made, so other systems can notice a new one.
+    pub jump_count: u32,
 
     move_axis: Vec3,
     climb_dir: Vec3,
@@ -113,6 +115,7 @@ impl Player {
             prev_pos: pos,
             cur_pos: pos,
             speed_mps: 0.0,
+            jump_count: 0,
             move_axis: Vec3::ZERO,
             climb_dir: Vec3::Y,
             jump_dir: Vec3::Y,
@@ -134,7 +137,9 @@ impl Player {
     }
 
     pub fn teleport(&mut self, pos: Vec3, yaw: f32) {
+        let jump_count = self.jump_count;
         *self = Self::new(pos, yaw);
+        self.jump_count = jump_count;
     }
 
     fn grounded_or_coyote(&self) -> bool {
@@ -210,6 +215,7 @@ impl Player {
         self.time_since_grounded = COYOTE_TIME;
         self.has_jumped = true;
         self.is_grounded = false;
+        self.jump_count += 1;
     }
 }
 

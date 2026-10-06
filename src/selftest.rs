@@ -3,6 +3,7 @@
 //! hold, jump off, and log what the body did along the way.
 
 use bevy::prelude::*;
+use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 
 use crate::level::Handhold;
 use crate::player::Player;
@@ -18,9 +19,11 @@ pub struct Script {
     next_log: f32,
     at_wall: Option<f32>,
     max_height: f32,
+    shots: usize,
 }
 
 pub fn run(
+    mut commands: Commands,
     time: Res<Time>,
     mut script: Local<Script>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
@@ -64,6 +67,13 @@ pub fn run(
         }
         Some(start) => {
             let phase = t - start;
+            // One picture per stage: reaching, one hand on, both hands on.
+            let shot_times = [0.05, 2.5, 4.5];
+            if script.shots < shot_times.len() && phase >= shot_times[script.shots] {
+                let path = format!("target/selftest_{}.png", script.shots);
+                commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
+                script.shots += 1;
+            }
             if phase < 3.0 {
                 // Phase 2: left hand on the first hold, then pull up.
                 if let Some(target) = hold_at(0) {

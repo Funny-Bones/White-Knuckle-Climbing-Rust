@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = "0.19"
+bevy = { version = "0.19", features = ["wav"] }
 bevy_rapier3d = "0.36.0"
 
 # Bevy is unusably slow unoptimised; keep our own crate quick to rebuild.
