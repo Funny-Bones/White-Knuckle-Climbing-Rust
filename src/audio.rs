@@ -23,6 +23,10 @@ const HEAVY_LANDING: f32 = 20.0;
 /// Time in the air before touching down counts as a landing.
 const LANDING_AIR_TIME: f32 = 0.2;
 const FATIGUE_MAX_VOLUME: f32 = 0.35;
+/// Footstep timer resets; the timer runs down at the movement speed.
+const FOOTSTEP_WALK: f32 = 0.8;
+const FOOTSTEP_CROUCH: f32 = 1.0;
+const FOOTSTEP_SPRINT: f32 = 0.6;
 
 /// A group of interchangeable clips with the volume and pitch range to play them at.
 #[derive(Default)]
@@ -42,6 +46,7 @@ pub struct Sounds {
     land_soft: SoundSet,
     land_medium: SoundSet,
     land_heavy: SoundSet,
+    footstep: SoundSet,
 }
 
 #[derive(Component)]
@@ -55,6 +60,8 @@ pub struct Tracker {
     air_time: f32,
     fall_speed: f32,
     fatigue_volume: f32,
+    /// Counts down to the next footstep.
+    footstep_timer: f32,
     rng: u32,
 }
 
@@ -68,6 +75,7 @@ impl Default for Tracker {
             air_time: 0.0,
             fall_speed: 0.0,
             fatigue_volume: 0.0,
+            footstep_timer: 0.0,
             rng: 0x9E37_79B9,
         }
     }
@@ -123,6 +131,17 @@ pub fn setup_audio(mut commands: Commands, asset_server: Res<AssetServer>) {
             0.5,
             (0.95, 1.0),
         ),
+        footstep: set(
+            &[
+                "player_step_concrete_01",
+                "player_step_concrete_03",
+                "player_step_generic_01",
+                "player_step_generic_02",
+                "player_step_generic_03",
+            ],
+            0.1,
+            (0.95, 1.0),
+        ),
     });
 
     let fatigue = asset_path("hand_fatigue_new");
@@ -149,7 +168,7 @@ pub fn play_sounds(
     let dt = time.delta_secs();
     let tracker = &mut *tracker;
     let mut play = |tracker: &mut Tracker, label: &str, set: &SoundSet| {
-        if selftest::enabled() {
+        if selftest::any_enabled() {
             info!("sound: {label}");
         }
         if set.clips.is_empty() {
@@ -202,6 +221,22 @@ pub fn play_sounds(
         tracker.fall_speed = -player.vel.y * VEL_SCALE;
     }
     tracker.was_grounded = player.is_grounded;
+
+    // Footsteps tick faster with speed: sprinting is about three a second.
+    if player.is_moving() && tracker.air_time < LANDING_AIR_TIME {
+        let (speed, interval) = if player.crouching {
+            (CROUCH_SPEED, FOOTSTEP_CROUCH)
+        } else if player.sprinting {
+            (SPRINT_SPEED, FOOTSTEP_SPRINT)
+        } else {
+            (SPEED, FOOTSTEP_WALK)
+        };
+        tracker.footstep_timer -= speed.max(1.2) * dt;
+        if tracker.footstep_timer <= 0.0 {
+            tracker.footstep_timer = interval;
+            play(tracker, "footstep", &sounds.footstep);
+        }
+    }
 
     // The strain loop fades in over the second half of the weakest hand's grip.
     let target = if player.is_hanging() {

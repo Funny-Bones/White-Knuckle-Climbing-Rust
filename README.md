@@ -17,7 +17,7 @@ cargo run
 | A / D | Shift sideways |
 | Space | Jump (hands let go and pay a grip cost) |
 | Shift | Sprint on the ground; slide freely along the wall while hanging |
-| Ctrl | Brace: clamp to the wall and kill your swing |
+| Ctrl | Crouch on the ground; brace (clamp to the wall and kill your swing) while hanging |
 | R | Back to the start |
 | Esc | Release the mouse (click to capture it again) |
 
@@ -39,7 +39,7 @@ cargo run
   level burn grip 2.5x faster; the green one launches a stronger jump.
 
 Not ported: items and tools (pitons, rebar, hammer), perks and buffs, moving
-handholds, crouch height, swimming, fall damage, footsteps and voice lines.
+handholds, swimming, fall damage and voice lines.
 
 ## Ledge grabbing
 
@@ -51,7 +51,8 @@ the original: looking down with W held lowers you instead.
 
 ## The test park
 
-The level (`src/level.rs`) is a flat greybox park. You start facing the main
+The level (`src/level.rs`) is a flat park of white structures on a gridded
+floor (one square per metre) under a clear blue sky, all generated in code. You start facing the main
 wall; everything else is a short walk away.
 
 | Structure | Where | What it tests |
@@ -92,12 +93,13 @@ is not part of this repository; extract it from your own copy.
 
 ## Sounds
 
-Grabbing, letting go, losing your grip, jumping, mantling, landing and the
-fatigue loop each play the game's own clip, at the volume and pitch range the
+Grabbing, letting go, losing your grip, jumping, mantling, landing, footsteps
+(faster when sprinting, slower when crouched) and the fatigue loop each play the game's own clip, at the volume and pitch range the
 game uses, if the clip exists as a WAV in `assets/original/audio/`:
 
 ```
 climb1-4  letgo1-3  player_climbing_griplost  hand_fatigue_new
+player_step_concrete_01,03  player_step_generic_01-03
 player_fem_jump1-3  mantle1  landsoft2_new  land_medium1-3
 player_fem_land_heavy_01-02
 ```
@@ -124,3 +126,7 @@ reports how many times the body lost its speed without being told to stop.
 
 `WK_LEDGE=1 cargo run` grabs the top of a three metre block, pulls up and over,
 and reports whether the body ended up standing on it.
+
+`WK_HANDS=1 cargo run` photographs the hand poses (rest, walk, run, reach,
+crouch) to `target/hands_*.png`. Adding `WK_NOVSYNC=1` to any run uncaps the
+frame rate, and the self-test then reports the real rendering speed.

@@ -7,7 +7,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use crate::hands::AimTarget;
-use crate::level::{SPAWN_POS, SPAWN_YAW};
+use crate::level::{SPAWN_POS, SPAWN_YAW, Sky, sky_for_camera};
 use crate::player::{Player, PlayerState};
 use crate::tuning::*;
 
@@ -62,10 +62,13 @@ const HAND_LAYER: usize = 1;
 const SPRITE_DIR: &str = "original";
 /// World size of a hand sprite. Together with the rest position this puts the
 /// hands large in the bottom corners of the view, wrists off-screen.
-const SPRITE_SIZE: f32 = 0.38;
+const SPRITE_SIZE: f32 = 0.475;
 const HAND_BUTTONS: [MouseButton; 2] = [MouseButton::Left, MouseButton::Right];
 /// Delay before sprinting switches the hands to the run pose.
 const RUN_POSE_DELAY: f32 = 0.3;
+
+/// HUD colour that reads against a bright sky and a white floor.
+const HUD_INK: Color = Color::srgb(0.08, 0.10, 0.14);
 
 const SKIN: Vec3 = Vec3::new(0.86, 0.70, 0.60);
 const STRAINED: Vec3 = Vec3::new(0.90, 0.12, 0.10);
@@ -73,7 +76,7 @@ const STRAINED: Vec3 = Vec3::new(0.90, 0.12, 0.10);
 fn hand_rest(index: usize, sprites: bool) -> Vec3 {
     let side = if index == 0 { -1.0 } else { 1.0 };
     if sprites {
-        Vec3::new(side * 0.41, -0.44, -0.5)
+        Vec3::new(side * 0.458, -0.48, -0.5)
     } else {
         Vec3::new(side * 0.34, -0.30, -0.62)
     }
@@ -190,7 +193,7 @@ pub fn setup_view(
             margin: UiRect { left: Val::Px(-2.0), top: Val::Px(-2.0), ..default() },
             ..default()
         },
-        BackgroundColor(Color::WHITE),
+        BackgroundColor(HUD_INK),
     ));
 
     // One grip bar per hand, at the bottom corners clear of the hands.
@@ -210,13 +213,13 @@ pub fn setup_view(
                     justify_content: JustifyContent::FlexEnd,
                     ..default()
                 },
-                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+                BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.6)),
             ))
             .with_children(|bar| {
                 bar.spawn((
                     GripBar(index),
                     Node { width: Val::Percent(100.0), height: Val::Percent(100.0), ..default() },
-                    BackgroundColor(Color::WHITE),
+                    BackgroundColor(HUD_INK),
                 ));
             });
     }
@@ -226,11 +229,11 @@ pub fn setup_view(
             "Click to capture the mouse, Esc to release it\n\
              Left / right mouse: hold to grab with that hand\n\
              W: pull up   A/D: shift sideways   S: lower\n\
-             Space: jump (lets go)   Shift: slide on the wall   Ctrl: brace\n\
+             Space: jump (lets go)   Shift: slide on the wall   Ctrl: crouch / brace\n\
              R: back to the start",
         ),
         TextFont::from_font_size(15.0),
-        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.75)),
+        TextColor(HUD_INK.with_alpha(0.8)),
         Node {
             position_type: PositionType::Absolute,
             top: Val::Px(10.0),
@@ -242,7 +245,7 @@ pub fn setup_view(
         StatusText,
         Text::new(""),
         TextFont::from_font_size(15.0),
-        TextColor(Color::srgba(1.0, 1.0, 1.0, 0.75)),
+        TextColor(HUD_INK.with_alpha(0.8)),
         Node {
             position_type: PositionType::Absolute,
             top: Val::Px(10.0),
@@ -250,6 +253,17 @@ pub fn setup_view(
             ..default()
         },
     ));
+}
+
+/// Gives the camera its sky once the level has built it.
+pub fn attach_sky(
+    mut commands: Commands,
+    sky: Option<Res<Sky>>,
+    cameras: Query<Entity, (With<PlayerCamera>, Without<bevy::light::Skybox>)>,
+) {
+    if let (Some(sky), Ok(camera)) = (sky, cameras.single()) {
+        commands.entity(camera).insert(sky_for_camera(&sky));
+    }
 }
 
 pub fn cursor_grab(
@@ -280,7 +294,8 @@ pub fn mouse_look(
     let Ok(mut player) = players.single_mut() else {
         return;
     };
-    if !locked.0 || motion.delta == Vec2::ZERO {
+    // Scripted runs steer the view themselves; a real mouse would knock them off course.
+    if !locked.0 || motion.delta == Vec2::ZERO || crate::selftest::any_enabled() {
         return;
     }
     player.yaw -= motion.delta.x * MOUSE_SENSITIVITY;
@@ -300,6 +315,8 @@ pub fn respawn(keys: Res<ButtonInput<KeyCode>>, mut players: Query<(&mut Transfo
 
 /// The body only moves on physics ticks; the camera glides between them.
 pub fn camera_follow(
+    time: Res<Time>,
+    mut eye: Local<Option<f32>>,
     fixed_time: Res<Time<Fixed>>,
     players: Query<&Player>,
     mut cameras: Query<&mut Transform, With<PlayerCamera>>,
@@ -308,14 +325,16 @@ pub fn camera_follow(
         return;
     };
     let body = player.prev_pos.lerp(player.cur_pos, fixed_time.overstep_fraction());
-    camera.translation = body + Vec3::Y * EYE_OFFSET;
+    // Ease the eye height so crouching does not step with the physics tick.
+    let eye = eye.get_or_insert(player.eye_offset());
+    *eye += (player.eye_offset() - *eye) * (time.delta_secs() * 25.0).min(1.0);
+    camera.translation = body + Vec3::Y * *eye;
     camera.rotation = player.look_rotation();
 }
 
 pub fn update_hand_visuals(
     time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
     locked: Res<CursorLocked>,
     players: Query<&Player>,
     cameras: Query<&Transform, (With<PlayerCamera>, Without<HandVisual>)>,
@@ -332,8 +351,8 @@ pub fn update_hand_visuals(
     let dt = time.delta_secs();
     let speed = player.speed_mps.min(8.0);
     let walking = player.is_grounded && speed > 0.1;
-    let sprinting = keys.pressed(KeyCode::ShiftLeft) && player.is_grounded && speed > 0.3;
-    let crouching = keys.pressed(KeyCode::ControlLeft);
+    let sprinting = player.sprinting && speed > 0.3;
+    let crouching = player.crouching;
 
     for (mut transform, mut visual, material) in &mut hands {
         let hand = &player.hands[visual.index];
@@ -450,14 +469,14 @@ pub fn update_hud(
         }
     }
     if let Ok(mut crosshair) = crosshairs.single_mut() {
-        crosshair.0 = if aim.0.is_some() { Color::srgb(1.0, 0.8, 0.2) } else { Color::WHITE };
+        crosshair.0 = if aim.0.is_some() { Color::srgb(0.95, 0.45, 0.0) } else { HUD_INK };
     }
 
     for (bar, mut node, mut color) in &mut bars {
         let hand = &player.hands[bar.0];
         let fraction = hand.grip_fraction();
         node.height = Val::Percent(fraction * 100.0);
-        let tint = Vec3::ONE.lerp(STRAINED, 1.0 - fraction);
+        let tint = Vec3::new(0.08, 0.10, 0.14).lerp(STRAINED, 1.0 - fraction);
         let alpha = if hand.grab_wait > 0.0 && !hand.is_hanging() { 0.35 } else { 0.9 };
         color.0 = Color::srgba(tint.x, tint.y, tint.z, alpha);
     }

@@ -3,8 +3,14 @@
 
 use std::f32::consts::{PI, TAU};
 
-use bevy::light::CascadeShadowConfigBuilder;
+use bevy::asset::RenderAssetUsages;
+use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::light::{CascadeShadowConfigBuilder, Skybox};
+use bevy::math::Affine2;
 use bevy::prelude::*;
+use bevy::render::render_resource::{
+    Extent3d, TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
+};
 use bevy_rapier3d::prelude::*;
 
 /// Solid geometry the body collides with.
@@ -101,6 +107,9 @@ struct Builder<'a, 'w, 's> {
     meshes: &'a mut Assets<Mesh>,
     materials: &'a mut Assets<StandardMaterial>,
     palette: Palette,
+    /// One unit cube shared by every block and hold, sized by its transform,
+    /// so the renderer can draw them in batches.
+    cube: Handle<Mesh>,
 }
 
 impl Builder<'_, '_, '_> {
@@ -116,10 +125,10 @@ impl Builder<'_, '_, '_> {
         rotation: Quat,
     ) {
         self.commands.spawn((
-            Mesh3d(self.meshes.add(Cuboid::from_size(size))),
+            Mesh3d(self.cube.clone()),
             MeshMaterial3d(material.clone()),
-            Transform::from_translation(center).with_rotation(rotation),
-            Collider::cuboid(size.x * 0.5, size.y * 0.5, size.z * 0.5),
+            Transform::from_translation(center).with_rotation(rotation).with_scale(size),
+            Collider::cuboid(0.5, 0.5, 0.5),
             CollisionGroups::new(WORLD_GROUP, Group::ALL),
         ));
     }
@@ -134,10 +143,10 @@ impl Builder<'_, '_, '_> {
             &self.palette.hold
         };
         self.commands.spawn((
-            Mesh3d(self.meshes.add(Cuboid::from_size(size))),
+            Mesh3d(self.cube.clone()),
             MeshMaterial3d(material.clone()),
-            Transform::from_translation(center).with_rotation(rotation),
-            Collider::cuboid(size.x * 0.5, size.y * 0.5, size.z * 0.5),
+            Transform::from_translation(center).with_rotation(rotation).with_scale(size),
+            Collider::cuboid(0.5, 0.5, 0.5),
             CollisionGroups::new(HANDHOLD_GROUP, Group::ALL),
             handhold,
         ));
@@ -173,6 +182,7 @@ pub fn setup_level(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     let materials = &mut *materials;
     let mut solid = |r: f32, g: f32, b: f32| {
@@ -183,20 +193,31 @@ pub fn setup_level(
         })
     };
     let palette = Palette {
-        ground: solid(0.16, 0.17, 0.19),
-        wall: solid(0.30, 0.31, 0.34),
-        stone: solid(0.38, 0.36, 0.33),
-        ledge: solid(0.22, 0.26, 0.32),
-        ramp: solid(0.28, 0.33, 0.30),
+        // Everything solid is white; slight tints keep neighbours apart.
+        ground: solid(1.0, 1.0, 1.0),
+        wall: solid(0.95, 0.95, 0.96),
+        stone: solid(0.92, 0.91, 0.89),
+        ledge: solid(0.84, 0.87, 0.92),
+        ramp: solid(0.88, 0.92, 0.89),
         hold: solid(0.95, 0.72, 0.18),
         slick: solid(0.85, 0.22, 0.20),
         spring: solid(0.25, 0.80, 0.40),
         goal: solid(1.0, 0.9, 0.35),
     };
-    let mut b = Builder { commands: &mut commands, meshes: &mut meshes, materials, palette };
+    let cube = meshes.add(Cuboid::from_length(1.0));
+    let mut b = Builder { commands: &mut commands, meshes: &mut meshes, materials, palette, cube };
 
-    let ground = b.palette.ground.clone();
-    b.block(&ground, Vec3::new(0.0, -0.5, 0.0), Vec3::new(160.0, 1.0, 160.0));
+    // The ground is a white floor ruled into one metre squares.
+    let ground_size = 160.0;
+    let grid = images.add(grid_texture());
+    let ground = b.materials.add(StandardMaterial {
+        base_color_texture: Some(grid),
+        perceptual_roughness: 0.9,
+        uv_transform: Affine2::from_scale(Vec2::splat(ground_size / GRID_TILE_METRES)),
+        ..default()
+    });
+    b.palette.ground = ground.clone();
+    b.block(&ground, Vec3::new(0.0, -0.5, 0.0), Vec3::new(ground_size, 1.0, ground_size));
 
     main_wall(&mut b);
     chimney(&mut b);
@@ -214,30 +235,31 @@ pub fn setup_level(
     great_cube(&mut b);
 
     lighting(&mut b);
+    commands.insert_resource(Sky(images.add(sky_texture())));
 }
 
-/// A low sun for long shadows, cool ambient light so shadowed faces stay
-/// readable, and coloured lamps that mark the structures.
+/// A bright day: a sun that casts long shadows, sky-blue ambient light so
+/// shadowed faces stay readable, and coloured lamps that mark the structures.
 fn lighting(b: &mut Builder) {
     b.commands.spawn((
         DirectionalLight {
-            color: Color::srgb(1.0, 0.93, 0.82),
-            illuminance: 11_000.0,
+            color: Color::srgb(1.0, 0.98, 0.94),
+            illuminance: 12_000.0,
             shadow_maps_enabled: true,
             ..default()
         },
         CascadeShadowConfigBuilder {
-            num_cascades: 4,
-            first_cascade_far_bound: 14.0,
-            maximum_distance: 160.0,
+            num_cascades: 3,
+            first_cascade_far_bound: 16.0,
+            maximum_distance: 140.0,
             ..default()
         }
         .build(),
-        Transform::from_xyz(40.0, 34.0, 28.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_translation(SUN_DIRECTION * 60.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
     b.commands.insert_resource(GlobalAmbientLight {
-        color: Color::srgb(0.72, 0.80, 1.0),
-        brightness: 1400.0,
+        color: Color::srgb(0.72, 0.84, 1.0),
+        brightness: 1100.0,
         ..default()
     });
 
@@ -245,11 +267,13 @@ fn lighting(b: &mut Builder) {
     let cool = Color::srgb(0.35, 0.75, 1.0);
     let green = Color::srgb(0.45, 1.0, 0.55);
     let red = Color::srgb(1.0, 0.3, 0.25);
-    // Position, colour, and whether the lamp casts shadows.
+    // Position, colour, and whether the lamp casts shadows. None do for now:
+    // in daylight their shadows are invisible and each one costs six extra
+    // passes over the whole level.
     let lamps = [
-        (Vec3::new(-1.5, 27.4, 0.5), warm, true),     // under the main wall's roof
+        (Vec3::new(-1.5, 27.4, 0.5), warm, false),    // under the main wall's roof
         (Vec3::new(5.2, 15.4, -0.6), cool, false),    // rest ledge
-        (Vec3::new(13.75, 9.0, -4.0), warm, true),    // inside the chimney
+        (Vec3::new(13.75, 9.0, -4.0), warm, false),   // inside the chimney
         (Vec3::new(13.75, 18.5, -4.0), warm, false),
         (Vec3::new(0.0, 9.6, 12.0), cool, false),     // monkey bars
         (Vec3::new(25.6, 13.0, -12.4), cool, false),  // spire rest ledges
@@ -258,11 +282,11 @@ fn lighting(b: &mut Builder) {
         (Vec3::new(24.0, 51.6, -14.0), warm, false),  // spire summit
         (Vec3::new(27.5, 12.0, -2.0), red, false),    // slick tower
         (Vec3::new(27.5, 12.0, 4.0), green, false),   // spring tower
-        (Vec3::new(20.0, 3.0, 11.5), warm, true),     // under the leaning slab
+        (Vec3::new(20.0, 3.0, 11.5), warm, false),    // under the leaning slab
         (Vec3::new(15.0, 8.5, 18.0), cool, false),    // hanging garden
         (Vec3::new(20.0, 8.0, 20.0), warm, false),    // traverse wall
         (Vec3::new(0.0, 14.0, 32.0), cool, false),    // inside the spiral
-        (Vec3::new(-11.0, 4.6, 16.0), warm, true),    // under the arch
+        (Vec3::new(-11.0, 4.6, 16.0), warm, false),   // under the arch
         (Vec3::new(-19.0, 9.0, -7.0), green, false),  // pillar forest
         (Vec3::new(-28.0, 11.2, -14.6), warm, false), // under the cube's cap
         (Vec3::new(-20.6, 11.2, -22.0), cool, false),
@@ -579,4 +603,143 @@ fn great_cube(b: &mut Builder) {
         b.hold(lip, normal, Handhold::default());
         b.hold(lip + Vec3::Y * 0.3 - normal * 0.6, Vec3::Y, Handhold::default());
     }
+}
+
+/// Direction towards the sun; the sky's glow and the shadows both use it.
+const SUN_DIRECTION: Vec3 = Vec3::new(0.67, 0.57, 0.47);
+/// World size covered by one repeat of the ground texture.
+const GRID_TILE_METRES: f32 = 4.0;
+
+/// The sky cube map, for the camera to draw behind everything.
+#[derive(Resource)]
+pub struct Sky(pub Handle<Image>);
+
+pub fn sky_for_camera(sky: &Sky) -> Skybox {
+    Skybox { image: Some(sky.0.clone()), brightness: 1800.0, ..default() }
+}
+
+/// A clear blue sky: deep overhead, pale at the horizon, with a glow around
+/// the sun. Built as a cube map so no image file is needed.
+fn sky_texture() -> Image {
+    const SIZE: usize = 128;
+    let zenith = Vec3::new(0.10, 0.36, 0.86);
+    let horizon = Vec3::new(0.62, 0.80, 0.98);
+    let ground = Vec3::new(0.80, 0.86, 0.94);
+    let sun = SUN_DIRECTION.normalize();
+    let mut data = Vec::with_capacity(SIZE * SIZE * 6 * 4);
+    for face in 0..6 {
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let u = (x as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+                let v = (y as f32 + 0.5) / SIZE as f32 * 2.0 - 1.0;
+                // Cube map faces in the order +X, -X, +Y, -Y, +Z, -Z.
+                let dir = match face {
+                    0 => Vec3::new(1.0, -v, -u),
+                    1 => Vec3::new(-1.0, -v, u),
+                    2 => Vec3::new(u, 1.0, v),
+                    3 => Vec3::new(u, -1.0, -v),
+                    4 => Vec3::new(u, -v, 1.0),
+                    _ => Vec3::new(-u, -v, -1.0),
+                }
+                .normalize();
+                let mut color = if dir.y >= 0.0 {
+                    horizon.lerp(zenith, dir.y.powf(0.55))
+                } else {
+                    horizon.lerp(ground, (-dir.y * 4.0).min(1.0))
+                };
+                let toward_sun = dir.dot(sun).max(0.0);
+                color += Vec3::new(1.0, 0.95, 0.85) * (toward_sun.powf(8.0) * 0.18);
+                color = color.lerp(Vec3::ONE, toward_sun.powf(900.0));
+                for channel in color.min(Vec3::ONE).to_array() {
+                    data.push((channel * 255.0) as u8);
+                }
+                data.push(255);
+            }
+        }
+    }
+    let mut image = Image::new(
+        Extent3d { width: SIZE as u32, height: SIZE as u32, depth_or_array_layers: 6 },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_view_descriptor = Some(TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::Cube),
+        ..default()
+    });
+    image.sampler = ImageSampler::linear();
+    image
+}
+
+/// White with a grey line every metre and a darker one every four. It has a
+/// full set of mip levels so the lines fade with distance instead of shimmering.
+fn grid_texture() -> Image {
+    const SIZE: usize = 256;
+    let cell = SIZE / GRID_TILE_METRES as usize;
+    let mut level: Vec<[f32; 3]> = Vec::with_capacity(SIZE * SIZE);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let edge = |c: usize, width: usize| c % cell < width || c % cell >= cell - width;
+            let major = x < 2 || x >= SIZE - 2 || y < 2 || y >= SIZE - 2;
+            let shade = if major {
+                0.42
+            } else if edge(x, 1) || edge(y, 1) {
+                0.66
+            } else {
+                0.93
+            };
+            level.push([shade, shade, shade * 1.02]);
+        }
+    }
+    let mut data = Vec::new();
+    let mut size = SIZE;
+    let mut mips = 0;
+    loop {
+        for texel in &level {
+            for channel in texel {
+                data.push((channel.min(1.0) * 255.0) as u8);
+            }
+            data.push(255);
+        }
+        mips += 1;
+        if size == 1 {
+            break;
+        }
+        // Average each 2x2 block for the next level down.
+        let half = size / 2;
+        let mut next = Vec::with_capacity(half * half);
+        for y in 0..half {
+            for x in 0..half {
+                let mut sum = [0.0f32; 3];
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let texel = level[(y * 2 + dy) * size + x * 2 + dx];
+                    for c in 0..3 {
+                        sum[c] += texel[c] * 0.25;
+                    }
+                }
+                next.push(sum);
+            }
+        }
+        level = next;
+        size = half;
+    }
+    let mut image = Image::new_uninit(
+        Extent3d { width: SIZE as u32, height: SIZE as u32, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.mip_level_count = mips;
+    image.data = Some(data);
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        anisotropy_clamp: 16,
+        ..default()
+    });
+    image
 }

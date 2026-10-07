@@ -18,6 +18,12 @@ fn main() {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "White Knuckle climbing (Bevy)".into(),
+                    // `WK_NOVSYNC=1` uncaps the frame rate, for measuring it.
+                    present_mode: if std::env::var_os("WK_NOVSYNC").is_some() {
+                        bevy::window::PresentMode::AutoNoVsync
+                    } else {
+                        bevy::window::PresentMode::AutoVsync
+                    },
                     ..default()
                 }),
                 ..default()
@@ -27,7 +33,7 @@ fn main() {
     )
     .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
     .insert_resource(Time::<Fixed>::from_hz(tuning::FIXED_HZ))
-    .insert_resource(ClearColor(Color::srgb(0.03, 0.035, 0.05)))
+    .insert_resource(ClearColor(Color::srgb(0.45, 0.68, 0.95)))
     .init_resource::<hands::AimTarget>()
     .init_resource::<view::CursorLocked>()
     .add_systems(Startup, (level::setup_level, view::setup_view, audio::setup_audio, spawn_player))
@@ -38,6 +44,7 @@ fn main() {
     .add_systems(
         Update,
         (
+            view::attach_sky,
             view::cursor_grab,
             view::mouse_look,
             selftest::run.run_if(selftest::enabled),

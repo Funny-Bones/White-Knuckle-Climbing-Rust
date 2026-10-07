@@ -1,6 +1,8 @@
 //! The player body: ground movement, hanging, pulling up and jumping.
 
 use bevy::prelude::*;
+use bevy_rapier3d::parry::query::ShapeCastOptions;
+use bevy_rapier3d::parry::shape::Ball;
 use bevy_rapier3d::prelude::*;
 
 use crate::level::{Handhold, Holds, WORLD_GROUP};
@@ -89,6 +91,11 @@ pub struct Player {
     pub speed_mps: f32,
     /// Number of jumps made, so other systems can notice a new one.
     pub jump_count: u32,
+    /// Current capsule height; shrinks from the top while crouching.
+    pub height: f32,
+    pub crouching: bool,
+    /// Sprinting on the ground this tick.
+    pub sprinting: bool,
 
     move_axis: Vec3,
     climb_dir: Vec3,
@@ -116,6 +123,9 @@ impl Player {
             cur_pos: pos,
             speed_mps: 0.0,
             jump_count: 0,
+            height: CAPSULE_HEIGHT,
+            crouching: false,
+            sprinting: false,
             move_axis: Vec3::ZERO,
             climb_dir: Vec3::Y,
             jump_dir: Vec3::Y,
@@ -130,6 +140,16 @@ impl Player {
 
     pub fn is_hanging(&self) -> bool {
         self.hands.iter().any(Hand::is_hanging)
+    }
+
+    /// Camera height above the body centre; it drops with the capsule's top.
+    pub fn eye_offset(&self) -> f32 {
+        EYE_OFFSET + (self.height - CAPSULE_HEIGHT)
+    }
+
+    /// Whether the player is pushing in some direction.
+    pub fn is_moving(&self) -> bool {
+        self.move_axis.length() > 0.5
     }
 
     pub fn look_rotation(&self) -> Quat {
@@ -430,8 +450,37 @@ pub fn player_movement(
     if keys.pressed(KeyCode::KeyA) {
         input.x -= 1.0;
     }
-    let sprinting = keys.pressed(KeyCode::ShiftLeft);
+    // Ctrl crouches, and braces against the wall while hanging.
     let bracing = keys.pressed(KeyCode::ControlLeft);
+    if bracing {
+        p.crouching = true;
+    } else if p.crouching {
+        // Stand up only if there is room for the top of the capsule.
+        let reach = CAPSULE_HEIGHT - CROUCH_HEIGHT;
+        let crouched_top = pos + up * (CROUCH_HEIGHT - CAPSULE_HEIGHT * 0.5 - CAPSULE_RADIUS);
+        let headroom = ShapeCastOptions {
+            max_time_of_impact: reach,
+            target_distance: 0.0,
+            stop_at_penetration: true,
+            compute_impact_geometry_on_penetration: false,
+        };
+        let blocked = rapier
+            .cast_shape(
+                crouched_top,
+                Quat::IDENTITY,
+                up,
+                &Ball::new(CAPSULE_RADIUS * 0.9),
+                headroom,
+                world_only,
+            )
+            .is_some();
+        p.crouching = blocked;
+    }
+    let target_height = if p.crouching { CROUCH_HEIGHT } else { CAPSULE_HEIGHT };
+    let height_step = (CAPSULE_HEIGHT - CROUCH_HEIGHT) / CROUCH_TIME * dt;
+    p.height += (target_height - p.height).clamp(-height_step, height_step);
+    let sprinting = keys.pressed(KeyCode::ShiftLeft) && !p.crouching;
+    p.sprinting = sprinting && p.is_grounded;
 
     let yaw_rotation = Quat::from_rotation_y(p.yaw);
     let flat_forward = yaw_rotation * Vec3::NEG_Z;
@@ -513,11 +562,11 @@ pub fn player_movement(
         if p.is_grounded {
             cur_speed = SPRINT_SPEED;
         }
-    } else if bracing && !p.is_sliding {
+    } else if p.crouching && !p.is_sliding {
         cur_speed = CROUCH_SPEED;
     }
 
-    let eye = pos + up * EYE_OFFSET;
+    let eye = pos + up * p.eye_offset();
     let cam_forward = p.look_rotation() * Vec3::NEG_Z;
     let wall_ahead = hanging
         && rapier
@@ -555,6 +604,14 @@ pub fn player_movement(
         p.vel = project_on_plane(p.vel, p.hit_normal);
     }
 
+    // A crouched body is a shorter capsule with its feet in the same place.
+    controller.custom_shape = (p.height < CAPSULE_HEIGHT).then(|| {
+        (
+            Collider::capsule_y(p.height * 0.5 - CAPSULE_RADIUS, CAPSULE_RADIUS),
+            up * (p.height - CAPSULE_HEIGHT) * 0.5,
+            Quat::IDENTITY,
+        )
+    });
     let mut step = p.vel * dt * VEL_SCALE;
     // The original presses the body into the floor every tick. This character
     // controller often answers that by not moving at all, so on walkable

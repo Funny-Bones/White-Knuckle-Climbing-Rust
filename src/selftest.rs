@@ -14,6 +14,11 @@ pub fn enabled() -> bool {
     std::env::var_os("WK_SELFTEST").is_some()
 }
 
+/// Whether any of the scripted modes is running (they log sound cues).
+pub fn any_enabled() -> bool {
+    enabled() || walk_enabled() || ledge_enabled() || hands_enabled()
+}
+
 #[derive(Default)]
 pub struct Script {
     next_log: f32,
@@ -295,8 +300,8 @@ pub fn ledge(
     }
 }
 
-/// `WK_HANDS=1` photographs the hand poses: resting, walking, running, and
-/// reaching with one button held.
+/// `WK_HANDS=1` photographs the hand poses: resting, walking, running,
+/// reaching with one button held, and crouch-walking.
 pub fn hands_enabled() -> bool {
     std::env::var_os("WK_HANDS").is_some()
 }
@@ -314,25 +319,36 @@ pub fn hands(
         return;
     };
     locked.0 = true;
-    // Face away from the wall so nothing is in reach.
-    player.yaw = std::f32::consts::PI;
-    player.pitch = 0.0;
     let t = time.elapsed_secs();
-    let stages = ["rest", "walk", "run", "reach"];
+    let stages = ["rest", "walk", "run", "reach", "crouch"];
     let stage = ((t - 1.0).max(0.0) / 1.5) as usize;
+    // Face away from the wall so nothing is in reach, then turn towards open
+    // ground for the crouch walk.
+    player.yaw = if stage < 4 { std::f32::consts::PI } else { std::f32::consts::FRAC_PI_2 };
+    player.pitch = 0.0;
     if stage >= stages.len() {
         std::process::exit(0);
     }
     let set = |keys: &mut ButtonInput<KeyCode>, key, down: bool| {
         if down { keys.press(key) } else { keys.release(key) }
     };
-    set(&mut keys, KeyCode::KeyW, stage == 1 || stage == 2);
+    set(&mut keys, KeyCode::KeyW, stage == 1 || stage == 2 || stage == 4);
     set(&mut keys, KeyCode::ShiftLeft, stage == 2);
+    set(&mut keys, KeyCode::ControlLeft, stage == 4);
     if stage == 3 {
         mouse.press(MouseButton::Left);
+    } else {
+        mouse.release(MouseButton::Left);
     }
     if *shots == stage && (t - 1.0) - stage as f32 * 1.5 > 1.2 {
         let path = format!("target/hands_{}.png", stages[stage]);
+        info!(
+            "hands: {} speed={:.2} m/s body height={:.2} eye={:.2}",
+            stages[stage],
+            player.speed_mps,
+            player.height,
+            player.eye_offset()
+        );
         commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path));
         *shots += 1;
     }

@@ -75,6 +75,10 @@ pub const WALL_AHEAD_DISTANCE: f32 = 0.75;
 // Body dimensions (the original is a 1.5 m tall, 0.3 m radius capsule scaled by 1.5).
 pub const CAPSULE_RADIUS: f32 = 0.45;
 pub const CAPSULE_HEIGHT: f32 = 2.25;
+/// Capsule height while crouched (the original's 1.0 scaled by 1.5).
+pub const CROUCH_HEIGHT: f32 = 1.5;
+/// Seconds to go between standing and crouched.
+pub const CROUCH_TIME: f32 = 0.25;
 /// Camera height above the body centre.
 pub const EYE_OFFSET: f32 = 0.675;
 /// How far the body is pulled down to stay on the ground while walking.
