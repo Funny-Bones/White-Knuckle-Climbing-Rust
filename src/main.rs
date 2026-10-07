@@ -18,6 +18,9 @@ fn main() {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "White Knuckle climbing (Bevy)".into(),
+                    // Queue as few finished frames as possible, so the picture
+                    // follows the mouse closely even with vsync on.
+                    desired_maximum_frame_latency: std::num::NonZeroU32::new(1),
                     // `WK_NOVSYNC=1` uncaps the frame rate, for measuring it.
                     present_mode: if std::env::var_os("WK_NOVSYNC").is_some() {
                         bevy::window::PresentMode::AutoNoVsync
@@ -29,7 +32,9 @@ fn main() {
                 ..default()
             })
             // Keep pixel-art sprites crisp.
-            .set(ImagePlugin::default_nearest()),
+            .set(ImagePlugin::default_nearest())
+            // Rendering on a second thread shows every frame one frame late.
+            .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>(),
     )
     .add_plugins(RapierPhysicsPlugin::<NoUserData>::default().in_fixed_schedule())
     .insert_resource(Time::<Fixed>::from_hz(tuning::FIXED_HZ))

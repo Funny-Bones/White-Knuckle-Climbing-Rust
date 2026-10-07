@@ -87,6 +87,15 @@ assets/original/hand_background_open.png
 assets/original/hand_background_grab.png
 ```
 
+Two more optional files add the HUD icons beside the crosshair, which show an
+open hand when a hold or ledge is in reach and a fist while holding on,
+reddening as that hand's grip runs down:
+
+```
+assets/original/hud_hand_open.png
+assets/original/hud_hand_grabbed.png
+```
+
 They are the 128x128 cells of the game's `Hands_Background_Sprite_Library_01`
 texture. That art belongs to the game, so `assets/original` is git-ignored and
 is not part of this repository; extract it from your own copy.

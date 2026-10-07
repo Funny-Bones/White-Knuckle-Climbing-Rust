@@ -41,6 +41,21 @@ pub struct GripBar(usize);
 #[derive(Component)]
 pub struct StatusText;
 
+/// The icon beside the crosshair that says what a hand can do right now.
+#[derive(Component)]
+pub struct HudHand(usize);
+
+/// The game's HUD hand icons, if they have been extracted.
+#[derive(Resource)]
+pub struct HudIcons {
+    open: Handle<Image>,
+    grabbed: Handle<Image>,
+}
+
+/// Size of a HUD hand icon and its distance from the crosshair, in pixels.
+const HUD_ICON_SIZE: f32 = 64.0;
+const HUD_ICON_OFFSET: f32 = 52.0;
+
 /// The game's own hand art, when it has been extracted into
 /// `assets/original` (it is not part of this repository). Without it the
 /// hands are drawn as plain boxes.
@@ -130,6 +145,8 @@ pub fn setup_view(
             RenderLayers::layer(HAND_LAYER),
             // The sprites are flat white pixel art; leave their colours alone.
             Tonemapping::None,
+            // Draw the HUD on this camera too, so it sits above the hands.
+            IsDefaultUiCamera,
         )],
     ));
 
@@ -181,6 +198,42 @@ pub fn setup_view(
         Transform::default(),
         Visibility::Hidden,
     ));
+
+    // A hand icon either side of the crosshair: open when that hand has
+    // something in reach, closed while it is holding on.
+    let icon = |name: &str| format!("{SPRITE_DIR}/hud_hand_{name}.png");
+    let root = std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    if ["open", "grabbed"].iter().all(|name| root.join("assets").join(icon(name)).is_file()) {
+        let icons = HudIcons {
+            open: asset_server.load(icon("open")),
+            grabbed: asset_server.load(icon("grabbed")),
+        };
+        for index in 0..2 {
+            let side = if index == 0 { -1.0 } else { 1.0 };
+            commands.spawn((
+                HudHand(index),
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Percent(50.0),
+                    top: Val::Percent(50.0),
+                    width: Val::Px(HUD_ICON_SIZE),
+                    height: Val::Px(HUD_ICON_SIZE),
+                    margin: UiRect {
+                        left: Val::Px(side * HUD_ICON_OFFSET - HUD_ICON_SIZE * 0.5),
+                        top: Val::Px(-HUD_ICON_SIZE * 0.5),
+                        ..default()
+                    },
+                    ..default()
+                },
+                // The art is drawn as the right-hand icon; the left one is its mirror image.
+                ImageNode { image: icons.open.clone(), flip_x: index == 0, ..default() },
+                Visibility::Hidden,
+            ));
+        }
+        commands.insert_resource(icons);
+    }
 
     commands.spawn((
         Crosshair,
@@ -380,10 +433,8 @@ pub fn update_hand_visuals(
             let mut target = hand_rest(visual.index, poses.is_some());
             // The two hands move half a cycle apart.
             let offset = visual.index as f32 * std::f32::consts::PI;
-            if reaching {
-                // Held out towards whatever is ahead.
-                target += Vec3::new(-side * 0.14, 0.2, -0.06);
-            } else if running {
+            // Opening the hand only changes its pose; it stays where it is.
+            if running {
                 // Arms pump: up and forward, then down and back.
                 let phase = t * 11.0 + offset;
                 target += Vec3::new(0.0, 0.05 + 0.08 * phase.sin(), 0.07 * phase.cos());
@@ -450,7 +501,9 @@ pub fn update_hand_visuals(
 pub fn update_hud(
     players: Query<&Player>,
     aim: Res<AimTarget>,
-    mut markers: Query<(&mut Transform, &mut Visibility), With<AimMarker>>,
+    mut markers: Query<(&mut Transform, &mut Visibility), (With<AimMarker>, Without<HudHand>)>,
+    icons: Option<Res<HudIcons>>,
+    mut hud_hands: Query<(&HudHand, &mut ImageNode, &mut Visibility), Without<AimMarker>>,
     mut crosshairs: Query<&mut BackgroundColor, (With<Crosshair>, Without<GripBar>)>,
     mut bars: Query<(&GripBar, &mut Node, &mut BackgroundColor)>,
     mut status: Query<&mut Text, With<StatusText>>,
@@ -479,6 +532,31 @@ pub fn update_hud(
         let tint = Vec3::new(0.08, 0.10, 0.14).lerp(STRAINED, 1.0 - fraction);
         let alpha = if hand.grab_wait > 0.0 && !hand.is_hanging() { 0.35 } else { 0.9 };
         color.0 = Color::srgba(tint.x, tint.y, tint.z, alpha);
+    }
+
+    if let Some(icons) = icons {
+        for (hud_hand, mut image, mut visibility) in &mut hud_hands {
+            let hand = &player.hands[hud_hand.0];
+            let icon = if hand.is_hanging() {
+                Some(&icons.grabbed)
+            } else if aim.0.is_some() && hand.grab_wait <= 0.0 {
+                Some(&icons.open)
+            } else {
+                None
+            };
+            let Some(icon) = icon else {
+                *visibility = Visibility::Hidden;
+                continue;
+            };
+            *visibility = Visibility::Visible;
+            if image.image != *icon {
+                image.image = icon.clone();
+            }
+            // Reddens in six steps as the hand's grip runs down.
+            let grip = (hand.grip_fraction() * 6.0).round() / 6.0;
+            let tint = STRAINED.lerp(Vec3::ONE, grip);
+            image.color = Color::srgb(tint.x, tint.y, tint.z);
+        }
     }
 
     if let Ok(mut text) = status.single_mut() {

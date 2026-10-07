@@ -49,8 +49,12 @@ pub fn update_hands(
 
     for (hand, button) in player.hands.iter_mut().zip(HAND_BUTTONS) {
         let pressed = locked.0 && mouse.pressed(button);
+        // Count the lockout down to just below zero and no further. Left to
+        // run on, one long frame would bank enough negative time to cancel the
+        // next lockout, and a hand that let go for a jump would grab straight
+        // back on.
         if hand.grab_wait >= 0.0 {
-            hand.grab_wait -= dt;
+            hand.grab_wait = (hand.grab_wait - dt).max(-f32::EPSILON);
         }
 
         if hand.is_hanging() {
